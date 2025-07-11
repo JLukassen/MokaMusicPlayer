@@ -41,6 +41,9 @@ android {
 
 dependencies {
 
+    implementation(libs.androidx.core.ktx.v1160)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.material)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -56,4 +59,17 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
+
+    // Existing dependencies...
+// ExoPlayer
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
+// If using Compose (Material You)
+    implementation(libs.material3)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.runtime.ktx.v291)
+    implementation(libs.ui)
+    implementation(libs.ui.tooling.preview)
+    implementation(libs.coil.compose)
+    implementation(libs.androidx.material.icons.extended)
 }
