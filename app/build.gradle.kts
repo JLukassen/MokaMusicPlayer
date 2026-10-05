@@ -1,8 +1,16 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties()
 
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+}
 android {
     namespace = "com.mokamusic.player"
     compileSdk = 37
@@ -35,6 +43,17 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+   
+    signingConfigs {
+   	 create("release") {
+        	if (keystorePropertiesFile.exists()) {
+            	storeFile = file(keystoreProperties["storeFile"] as String)
+            	storePassword = keystoreProperties["storePassword"] as String
+            	keyAlias = keystoreProperties["keyAlias"] as String
+            	keyPassword = keystoreProperties["keyPassword"] as String
+              }
+    	   }
+	}
 }
 
 dependencies {
