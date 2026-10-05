@@ -1,0 +1,10 @@
+Open THIS directory in Android Studio — the directory containing:
+
+  settings.gradle.kts
+  build.gradle.kts
+  app/
+
+Do not open the parent Desktop directory.
+
+Moka Music Player v3.6 Native DSP
+compileSdk 37 / targetSdk 36 / minSdk 26

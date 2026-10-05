@@ -1,0 +1,366 @@
+package com.mokamusic.player.playback
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.os.Handler
+import android.os.Looper
+import androidx.annotation.OptIn
+import androidx.media3.common.C
+import androidx.media3.common.ForwardingSimpleBasePlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.SimpleBasePlayer
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import com.mokamusic.player.audio.AudioPathMonitor
+import com.mokamusic.player.audio.DirectPcmEngine
+import com.mokamusic.player.audio.dsp.DspSettingsStore
+
+/**
+ * Keeps ExoPlayer/Media3 as Moka's playlist, session and fallback engine while routing eligible
+ * local WAV/FLAC files through DirectPcmEngine.
+ *
+ * Because this object itself is the Player attached to MediaSession, lock-screen controls,
+ * notification controls, Bluetooth media buttons and the in-app MediaController all keep using
+ * the same queue regardless of which audio engine is currently rendering the track.
+ */
+@OptIn(UnstableApi::class)
+class HiFiHybridPlayer(
+    context: Context,
+    private val fallback: ExoPlayer
+) : ForwardingSimpleBasePlayer(fallback), DirectPcmEngine.Callback {
+
+    private val appContext = context.applicationContext
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val direct = DirectPcmEngine(appContext, this)
+    private val dspStore = DspSettingsStore(appContext)
+    private val dspReloadRunnable = Runnable { reloadCurrentItemForDspSettings() }
+    private val dspPreferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        // EQ sliders can save dozens of values while dragging. Debounce restarts so DSP hot reload
+        // is stable and audible without thrashing AudioTrack/MediaCodec.
+        mainHandler.removeCallbacks(dspReloadRunnable)
+        mainHandler.postDelayed(dspReloadRunnable, 350L)
+    }
+
+    @Volatile private var directActive = false
+    @Volatile private var desiredPlayWhenReady = false
+    @Volatile private var directState = DirectPcmEngine.State.IDLE
+    @Volatile private var directDurationMs = 0L
+    @Volatile private var directPositionMs = 0L
+    private var switchingInternally = false
+
+    private val fallbackListener = object : Player.Listener {
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (switchingInternally || directActive) return
+            val item = mediaItem ?: return
+            val wasPlaying = fallback.playWhenReady
+            if (wasPlaying && direct.canAttempt(item)) {
+                mainHandler.post {
+                    if (!directActive && fallback.currentMediaItem == item) {
+                        desiredPlayWhenReady = true
+                        fallback.pause()
+                        activateDirect(item, fallback.currentPosition.coerceAtLeast(0L), true)
+                    }
+                }
+            }
+        }
+    }
+
+    init {
+        fallback.addListener(fallbackListener)
+        dspStore.registerListener(dspPreferenceListener)
+    }
+
+    override fun getState(): SimpleBasePlayer.State {
+        val state = super.getState()
+        if (!directActive) return state
+
+        // SimpleBasePlayer validates every State combination. During a direct->fallback handoff,
+        // ExoPlayer can briefly still be loading while the direct engine has already gone idle.
+        // Reusing that isLoading/playerError data with a different playbackState can throw from
+        // State.Builder.build(), which is what the crash logs showed.
+        if (state.timeline.isEmpty) {
+            return state
+        }
+
+        val directStateSnapshot = directState
+        val playbackState = when (directStateSnapshot) {
+            DirectPcmEngine.State.PREPARING -> Player.STATE_BUFFERING
+            DirectPcmEngine.State.READY,
+            DirectPcmEngine.State.PLAYING,
+            DirectPcmEngine.State.PAUSED -> Player.STATE_READY
+            DirectPcmEngine.State.ENDED -> Player.STATE_ENDED
+            DirectPcmEngine.State.ERROR,
+            DirectPcmEngine.State.IDLE -> Player.STATE_IDLE
+        }
+        val position = direct.currentPositionMs.coerceAtLeast(0L)
+
+        return state.buildUpon()
+            .setPlayWhenReady(
+                desiredPlayWhenReady && playbackState != Player.STATE_ENDED,
+                Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST
+            )
+            .setPlaybackState(playbackState)
+            .setIsLoading(playbackState == Player.STATE_BUFFERING)
+            .setPlayerError(null)
+            .setContentPositionMs(position)
+            .build()
+    }
+
+    override fun handleSetMediaItems(
+        mediaItems: MutableList<MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long
+    ): ListenableFuture<*> {
+        deactivateDirect(clearMonitor = true)
+        desiredPlayWhenReady = false
+        return super.handleSetMediaItems(mediaItems, startIndex, startPositionMs)
+    }
+
+    override fun handlePrepare(): ListenableFuture<*> {
+        val item = fallback.currentMediaItem
+        if (item != null && direct.canAttempt(item)) {
+            fallback.playWhenReady = false
+            AudioPathMonitor.beginDirectPath()
+            val future = super.handlePrepare()
+            activateDirect(item, fallback.currentPosition.coerceAtLeast(0L), desiredPlayWhenReady)
+            return future
+        }
+        return super.handlePrepare()
+    }
+
+    override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
+        desiredPlayWhenReady = playWhenReady
+        val item = fallback.currentMediaItem
+        if (directActive) {
+            if (playWhenReady) direct.play() else direct.pause()
+            invalidateState()
+            return Futures.immediateVoidFuture()
+        }
+        if (playWhenReady && item != null && direct.canAttempt(item)) {
+            fallback.pause()
+            activateDirect(item, fallback.currentPosition.coerceAtLeast(0L), true)
+            return Futures.immediateVoidFuture()
+        }
+        return super.handleSetPlayWhenReady(playWhenReady)
+    }
+
+    override fun handleSeek(
+        mediaItemIndex: Int,
+        positionMs: Long,
+        seekCommand: Int
+    ): ListenableFuture<*> {
+        val currentIndex = fallback.currentMediaItemIndex
+        val targetIndex = mediaItemIndex.takeIf { it != C.INDEX_UNSET } ?: currentIndex
+        val targetPosition = positionMs.coerceAtLeast(0L)
+
+        if (directActive && targetIndex == currentIndex) {
+            direct.seekTo(targetPosition)
+            directPositionMs = targetPosition
+            invalidateState()
+            return Futures.immediateVoidFuture()
+        }
+
+        if (targetIndex in 0 until fallback.mediaItemCount) {
+            val target = fallback.getMediaItemAt(targetIndex)
+            if (direct.canAttempt(target)) {
+                switchingInternally = true
+                try {
+                    direct.stop()
+                    directActive = false
+                    fallback.pause()
+                    fallback.seekTo(targetIndex, targetPosition)
+                    activateDirect(target, targetPosition, desiredPlayWhenReady)
+                } finally {
+                    switchingInternally = false
+                }
+                return Futures.immediateVoidFuture()
+            }
+        }
+
+        if (directActive) {
+            switchingInternally = true
+            try {
+                direct.stop()
+                directActive = false
+                AudioPathMonitor.endDirectPath()
+                fallback.stop()
+                fallback.seekTo(targetIndex, targetPosition)
+                fallback.prepare()
+                if (desiredPlayWhenReady) fallback.play() else fallback.pause()
+            } finally {
+                switchingInternally = false
+            }
+            invalidateState()
+            return Futures.immediateVoidFuture()
+        }
+
+        return super.handleSeek(mediaItemIndex, positionMs, seekCommand)
+    }
+
+    override fun handleRelease(): ListenableFuture<*> {
+        mainHandler.removeCallbacks(dspReloadRunnable)
+        dspStore.unregisterListener(dspPreferenceListener)
+        direct.release()
+        fallback.removeListener(fallbackListener)
+        AudioPathMonitor.endDirectPath()
+        return super.handleRelease()
+    }
+
+    override fun onStateChanged(state: DirectPcmEngine.State) {
+        mainHandler.post {
+            directState = state
+            directPositionMs = direct.currentPositionMs
+            directDurationMs = direct.durationMs
+            invalidateState()
+        }
+    }
+
+    override fun onReady(durationMs: Long) {
+        mainHandler.post {
+            directDurationMs = durationMs
+            directPositionMs = direct.currentPositionMs
+            invalidateState()
+        }
+    }
+
+    override fun onEnded() {
+        mainHandler.post {
+            if (!directActive) return@post
+            if (fallback.repeatMode == Player.REPEAT_MODE_ONE) {
+                direct.seekTo(0L)
+                if (desiredPlayWhenReady) direct.play()
+                invalidateState()
+                return@post
+            }
+
+            val before = fallback.currentMediaItemIndex
+            switchingInternally = true
+            try {
+                direct.stop()
+                directActive = false
+                fallback.seekToNextMediaItem()
+                var after = fallback.currentMediaItemIndex
+                if (after == before && fallback.repeatMode == Player.REPEAT_MODE_ALL && fallback.mediaItemCount > 0) {
+                    fallback.seekToDefaultPosition(0)
+                    after = fallback.currentMediaItemIndex
+                }
+
+                if (after == before || after == C.INDEX_UNSET) {
+                    desiredPlayWhenReady = false
+                    directState = DirectPcmEngine.State.ENDED
+                    AudioPathMonitor.endDirectPath()
+                    invalidateState()
+                    return@post
+                }
+
+                val next = fallback.currentMediaItem
+                if (next != null && direct.canAttempt(next)) {
+                    activateDirect(next, 0L, desiredPlayWhenReady)
+                } else {
+                    AudioPathMonitor.endDirectPath()
+                    fallback.stop()
+                    if (after != C.INDEX_UNSET) fallback.seekTo(after, 0L)
+                    fallback.prepare()
+                    if (desiredPlayWhenReady) fallback.play()
+                }
+            } finally {
+                switchingInternally = false
+            }
+            invalidateState()
+        }
+    }
+
+    override fun onFallbackRequired(positionMs: Long, reason: String) {
+        mainHandler.post {
+            if (!directActive) return@post
+            val index = fallback.currentMediaItemIndex
+            directActive = false
+            directState = DirectPcmEngine.State.IDLE
+            AudioPathMonitor.endDirectPath()
+            AudioPathMonitor.clearOutput()
+
+            switchingInternally = true
+            try {
+                fallback.stop()
+                if (index != C.INDEX_UNSET) fallback.seekTo(index, positionMs.coerceAtLeast(0L))
+                fallback.prepare()
+                if (desiredPlayWhenReady) fallback.play() else fallback.pause()
+            } finally {
+                switchingInternally = false
+            }
+            invalidateState()
+        }
+    }
+
+
+    private fun reloadCurrentItemForDspSettings() {
+        val item = fallback.currentMediaItem ?: return
+        val position = if (directActive) direct.currentPositionMs else fallback.currentPosition.coerceAtLeast(0L)
+        val shouldPlay = desiredPlayWhenReady || fallback.playWhenReady
+        val shouldUseDirect = direct.canAttempt(item)
+
+        switchingInternally = true
+        try {
+            if (shouldUseDirect) {
+                direct.stop()
+                directActive = false
+                fallback.pause()
+                val index = fallback.currentMediaItemIndex
+                if (index != C.INDEX_UNSET) fallback.seekTo(index, position)
+                activateDirect(item, position, shouldPlay)
+            } else if (directActive) {
+                direct.stop()
+                directActive = false
+                AudioPathMonitor.endDirectPath()
+                AudioPathMonitor.clearOutput()
+                val index = fallback.currentMediaItemIndex
+                fallback.stop()
+                if (index != C.INDEX_UNSET) fallback.seekTo(index, position)
+                fallback.prepare()
+                if (shouldPlay) fallback.play() else fallback.pause()
+            }
+        } finally {
+            switchingInternally = false
+        }
+        invalidateState()
+    }
+
+    fun pauseForNoisyRoute() {
+        desiredPlayWhenReady = false
+        if (directActive) direct.pause() else fallback.pause()
+        invalidateState()
+    }
+
+    private fun activateDirect(item: MediaItem, positionMs: Long, playWhenReady: Boolean) {
+        directActive = true
+        desiredPlayWhenReady = playWhenReady
+        directState = DirectPcmEngine.State.PREPARING
+        directPositionMs = positionMs.coerceAtLeast(0L)
+        directDurationMs = 0L
+
+        val extras = item.mediaMetadata.extras
+        AudioPathMonitor.setSource(
+            sampleRateHz = extras?.getInt(AudioPathMonitor.EXTRA_SAMPLE_RATE_HZ, 0)?.takeIf { it > 0 },
+            bitDepth = extras?.getInt(AudioPathMonitor.EXTRA_BIT_DEPTH, 0)?.takeIf { it > 0 },
+            channels = extras?.getInt(AudioPathMonitor.EXTRA_CHANNEL_COUNT, 0)?.takeIf { it > 0 }
+        )
+        AudioPathMonitor.beginDirectPath()
+        direct.prepare(item, positionMs, playWhenReady)
+        invalidateState()
+    }
+
+    private fun deactivateDirect(clearMonitor: Boolean) {
+        if (directActive || direct.state != DirectPcmEngine.State.IDLE) direct.stop()
+        directActive = false
+        directState = DirectPcmEngine.State.IDLE
+        directDurationMs = 0L
+        directPositionMs = 0L
+        if (clearMonitor) {
+            AudioPathMonitor.endDirectPath()
+            AudioPathMonitor.clearOutput()
+        }
+    }
+}
