@@ -1,327 +1,121 @@
-# ============================================================
-# Moka Music Player
-# Android / Kotlin / C++ / NDK / CMake
-# ============================================================
-
-
-# ------------------------------------------------------------
-# Gradle
-# ------------------------------------------------------------
-
+# Gradle / build output
 .gradle/
 **/.gradle/
-
 build/
 **/build/
 
-.gradle-cache/
-
-
-# ------------------------------------------------------------
-# Android build outputs
-# ------------------------------------------------------------
-
-*.apk
-*.ap_
-*.aab
-*.aar
-
-captures/
-
-output-metadata.json
-
-
-# ------------------------------------------------------------
-# Android local SDK configuration
-# ------------------------------------------------------------
-
+# Android SDK / local machine
 local.properties
 
-
-# ------------------------------------------------------------
-# Release signing
-#
-# NEVER commit signing keys or credentials.
-# ------------------------------------------------------------
-
+# Signing / secrets
 keystore.properties
-
-*.jks
-*.keystore
-
 signing.properties
 release.properties
-
-
-# ------------------------------------------------------------
-# Native Android / NDK / CMake
-# ------------------------------------------------------------
-
-.cxx/
-**/.cxx/
-
-.externalNativeBuild/
-**/.externalNativeBuild/
-
-cmake-build-*/
-**/cmake-build-*/
-
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-
-*.ninja
-.ninja_deps
-.ninja_log
-
-compile_commands.json
-
-
-# ------------------------------------------------------------
-# Native compiled artifacts
-# ------------------------------------------------------------
-
-*.so
-*.o
-*.obj
-*.a
-*.lib
-
-*.dylib
-*.dll
-
-*.elf
-
-
-# ------------------------------------------------------------
-# Android Studio / IntelliJ IDEA
-# ------------------------------------------------------------
-
-.idea/
-
-*.iml
-*.ipr
-*.iws
-
-out/
-
-
-# ------------------------------------------------------------
-# Kotlin
-# ------------------------------------------------------------
-
-.kotlin/
-**/.kotlin/
-
-
-# ------------------------------------------------------------
-# Java
-# ------------------------------------------------------------
-
-*.class
-
-hs_err_pid*
-replay_pid*
-
-
-# ------------------------------------------------------------
-# Generated source / intermediate files
-# ------------------------------------------------------------
-
-generated/
-**/generated/
-
-intermediates/
-**/intermediates/
-
-tmp/
-**/tmp/
-
-
-# ------------------------------------------------------------
-# Logs / crash diagnostics
-# ------------------------------------------------------------
-
-*.log
-*.logcat
-
-moka-audio*.txt
-lasterror*.txt
-last_error*.txt
-last_crash*.txt
-
-crashlogs/
-logs/
-
-
-# ------------------------------------------------------------
-# Benchmark / profiling output
-# ------------------------------------------------------------
-
-*.trace
-*.hprof
-*.prof
-*.profraw
-*.profdata
-
-benchmark-results/
-profile-results/
-
-
-# ------------------------------------------------------------
-# DSP test output / generated audio
-#
-# Keep actual test fixtures only if intentionally committed.
-# ------------------------------------------------------------
-
-*.pcm
-*.raw
-
-dsp-output/
-dsp-debug/
-processed-audio/
-
-
-# ------------------------------------------------------------
-# User-imported DSP profiles
-#
-# Remove these rules if you intentionally want to publish
-# example profiles with the repository.
-# ------------------------------------------------------------
-
-local-dsp/
-private-dsp/
-user-presets/
-
-
-# ------------------------------------------------------------
-# Secrets / environment configuration
-# ------------------------------------------------------------
-
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
 .env
 .env.*
 !.env.example
 
-secrets.properties
-credentials.properties
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
 
-*.pem
-*.p12
-*.pfx
-*.key
+# Kotlin
+.kotlin/
+**/.kotlin/
 
+# NDK / CMake / Ninja
+.cxx/
+**/.cxx/
+.externalNativeBuild/
+**/.externalNativeBuild/
+cmake-build-*/
+**/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+.ninja_deps
+.ninja_log
+*.ninja
 
-# ------------------------------------------------------------
-# GitHub / CI local artifacts
-# ------------------------------------------------------------
+# Compiled native artifacts
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.dylib
+*.elf
 
-.github/*.local
-act-output/
+# Android packages / generated release output
+*.apk
+*.aab
+*.ap_
+*.aar
+output-metadata.json
+captures/
 
+# Logs / diagnostics / profiles
+*.log
+*.logcat
+*.hprof
+*.trace
+moka-audio*.txt
+last_error*.txt
+last_crash*.txt
+crashlogs/
+logs/
+benchmark-results/
+profile-results/
 
-# ------------------------------------------------------------
-# VS Code
-# ------------------------------------------------------------
-
-.vscode/
-
-# Uncomment if you later want to commit shared VS Code settings:
-# !.vscode/
-# .vscode/*
-# !.vscode/settings.json
-# !.vscode/extensions.json
-
-
-# ------------------------------------------------------------
-# Linux
-# ------------------------------------------------------------
-
-*~
-.fuse_hidden*
-.directory
-
-.Trash-*
-.nfs*
-
-
-# ------------------------------------------------------------
-# macOS
-# ------------------------------------------------------------
-
-.DS_Store
-.AppleDouble
-.LSOverride
-
-._*
-
-
-# ------------------------------------------------------------
-# Windows
-# ------------------------------------------------------------
-
-Thumbs.db
-Thumbs.db:encryptable
-ehthumbs.db
-Desktop.ini
-
-$RECYCLE.BIN/
-
-
-# ------------------------------------------------------------
-# Temporary / editor swap files
-# ------------------------------------------------------------
-
+# Temporary files
 *.swp
 *.swo
 *.swn
-
 *.tmp
 *.temp
 *.bak
-
 *.orig
 *.rej
+*~
 
+# OS noise
+.DS_Store
+.AppleDouble
+._*
+Thumbs.db
+Desktop.ini
+.directory
+.Trash-*
+.nfs*
 
-# ------------------------------------------------------------
-# Archives / local release packages
-#
-# Uncomment if you don't want ZIPs committed.
-# ------------------------------------------------------------
-
-# *.zip
-# *.tar
-# *.tar.gz
-# *.7z
-
-.ninja_log
-# ------------------------------------------------------------
-# Moka local release artifacts
-# ------------------------------------------------------------
-
+# Local Moka packaging
 Moka-Music-Player-*.apk
 MokaMusicPlayer-*.zip
 
-
-# ------------------------------------------------------------
-# DO NOT ignore these
-#
-# These are intentionally documented here because they are
-# important source-controlled project files.
-# ------------------------------------------------------------
-
+# Keep source and wrapper files tracked
 !gradlew
 !gradlew.bat
 !gradle/wrapper/gradle-wrapper.jar
 !gradle/wrapper/gradle-wrapper.properties
-
 !app/src/main/cpp/
 !app/src/main/cpp/**
 !app/src/main/java/
 !app/src/main/java/**
 !app/src/main/res/
 !app/src/main/res/**
-
 !CMakeLists.txt
 !**/CMakeLists.txt
+
+# Local release staging
+dist/

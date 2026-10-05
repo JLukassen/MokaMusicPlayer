@@ -33,6 +33,7 @@ class MusicLibraryRepository(private val context: Context) {
             add(MediaStore.Audio.Media.DURATION)
             add(MediaStore.Audio.Media.MIME_TYPE)
             add(MediaStore.Audio.Media.SIZE)
+            add(MediaStore.Audio.Media.DATE_ADDED)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(MediaStore.Audio.Media.RELATIVE_PATH)
         }.toTypedArray()
 
@@ -49,6 +50,7 @@ class MusicLibraryRepository(private val context: Context) {
             val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
             val mimeColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)
             val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
+            val dateAddedColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
             val relativePathColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH) else -1
 
             while (cursor.moveToNext()) {
@@ -89,6 +91,7 @@ class MusicLibraryRepository(private val context: Context) {
                     mimeType = cursor.getString(mimeColumn),
                     sizeBytes = cursor.getLong(sizeColumn),
                     relativePath = relativePath,
+                    dateAddedEpochSeconds = cursor.getLong(dateAddedColumn),
                     albumArtist = direct.albumArtist.usable(),
                     trackNumber = direct.trackNumber ?: inferred.trackNumber,
                     discNumber = direct.discNumber,
@@ -103,7 +106,7 @@ class MusicLibraryRepository(private val context: Context) {
         }
 
         val sorted = tracks.sortedWith(
-            compareBy<MusicTrack> { it.artist.lowercase() }
+            compareBy<MusicTrack> { (it.albumArtist?.takeIf(String::isNotBlank) ?: it.artist).lowercase() }
                 .thenBy { it.album.lowercase() }
                 .thenBy { it.discNumber ?: 0 }
                 .thenBy { it.trackNumber ?: Int.MAX_VALUE }

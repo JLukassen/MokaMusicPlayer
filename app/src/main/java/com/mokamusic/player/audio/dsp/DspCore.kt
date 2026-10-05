@@ -831,9 +831,11 @@ object PcmFloatCodec {
 class DspStreamAdapter(
     private val chain: DspBlockProcessor,
     private val channels: Int,
-    private val sampleRate: Int
+    private val sampleRate: Int,
+    private val automaticHeadroomDb: Float = 0f
 ) : AutoCloseable {
     private val blockFrames = chain.blockSize
+    private val headroomGain = 10.0.pow(automaticHeadroomDb / 20.0).toFloat()
     private var inputBlock = FloatArray(blockFrames * channels)
     private var pendingFrames = 0
     private var meterFrames = 0L
@@ -866,11 +868,7 @@ class DspStreamAdapter(
             pendingFrames += copyFrames
 
             if (pendingFrames == blockFrames) {
-                val started = System.nanoTime()
-                val processed = chain.processBlock(inputBlock)
-                meterNanos += System.nanoTime() - started
-                meterFrames += blockFrames.toLong()
-                maybeLogThroughput()
+                val processed = processCompleteBlock()
                 System.arraycopy(processed, 0, out, outSamples, processed.size)
                 outSamples += processed.size
                 inputBlock.fill(0f)
@@ -884,15 +882,42 @@ class DspStreamAdapter(
     fun flush(): FloatArray {
         if (pendingFrames == 0) return FloatArray(0)
         val realSamples = pendingFrames * channels
-        val started = System.nanoTime()
-        val processed = chain.processBlock(inputBlock)
-        meterNanos += System.nanoTime() - started
-        meterFrames += blockFrames.toLong()
-        maybeLogThroughput()
+        val processed = processCompleteBlock()
         val out = processed.copyOf(realSamples)
         inputBlock.fill(0f)
         pendingFrames = 0
         return out
+    }
+
+
+    private fun processCompleteBlock(): FloatArray {
+        var inputPeak = 0f
+        for (v in inputBlock) inputPeak = max(inputPeak, abs(v))
+        if (headroomGain != 1f) {
+            for (i in inputBlock.indices) inputBlock[i] *= headroomGain
+        }
+
+        val started = System.nanoTime()
+        val processed = chain.processBlock(inputBlock)
+        meterNanos += System.nanoTime() - started
+        meterFrames += blockFrames.toLong()
+
+        var outputPeak = 0f
+        var clipped = 0L
+        for (v in processed) {
+            val a = abs(v)
+            outputPeak = max(outputPeak, a)
+            if (a >= 0.99999f) clipped++
+        }
+        DspRuntimeMonitor.updateBlock(
+            engine = chain.implementationLabel,
+            inputPeak = inputPeak,
+            outputPeak = outputPeak,
+            clippedSamples = clipped,
+            headroomDb = automaticHeadroomDb
+        )
+        maybeLogThroughput()
+        return processed
     }
 
     private fun copyFrames(input: FloatArray, sourceFrame: Int, frameCount: Int) {
@@ -905,6 +930,10 @@ class DspStreamAdapter(
         chain.reset()
         inputBlock.fill(0f)
         pendingFrames = 0
+        meterFrames = 0L
+        meterNanos = 0L
+        meterStartedAt = System.nanoTime()
+        DspRuntimeMonitor.clear()
     }
 
     private fun maybeLogThroughput() {
@@ -913,6 +942,7 @@ class DspStreamAdapter(
         val audioSeconds = meterFrames.toDouble() / sampleRate.toDouble()
         val cpuSeconds = meterNanos.toDouble() / 1_000_000_000.0
         val realtime = if (cpuSeconds > 0.0) audioSeconds / cpuSeconds else 0.0
+        DspRuntimeMonitor.updateThroughput(chain.implementationLabel, realtime.toFloat(), automaticHeadroomDb)
         android.util.Log.i(
             "MokaDSP",
             "${chain.implementationLabel} DSP throughput=${"%.2f".format(realtime)}x realtime " +
@@ -923,6 +953,9 @@ class DspStreamAdapter(
         meterStartedAt = now
     }
 
-    override fun close() = chain.close()
+    override fun close() {
+        chain.close()
+        DspRuntimeMonitor.clear()
+    }
 }
 

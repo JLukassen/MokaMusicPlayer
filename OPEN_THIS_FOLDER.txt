@@ -6,5 +6,6 @@ Open THIS directory in Android Studio — the directory containing:
 
 Do not open the parent Desktop directory.
 
-Moka Music Player v3.6 Native DSP
+Moka Music Player v3.7 Feature / UX Iteration
 compileSdk 37 / targetSdk 36 / minSdk 26
+Native C++ DSP + automatic headroom + signal telemetry

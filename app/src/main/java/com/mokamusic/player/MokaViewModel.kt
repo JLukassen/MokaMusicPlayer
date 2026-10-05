@@ -2,6 +2,7 @@ package com.mokamusic.player
 
 import android.app.Application
 import android.content.ComponentName
+import android.os.Build
 import android.os.Bundle
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -10,12 +11,21 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.mokamusic.player.audio.AudioOutputInspector
 import com.mokamusic.player.audio.AudioOutputStatus
 import com.mokamusic.player.audio.AudioPathMonitor
+import com.mokamusic.player.audio.dsp.DspDeviceProfileStore
+import com.mokamusic.player.audio.dsp.DspMeterSnapshot
+import com.mokamusic.player.audio.dsp.DspPresetId
+import com.mokamusic.player.audio.dsp.DspPresets
+import com.mokamusic.player.audio.dsp.DspRuntimeMonitor
+import com.mokamusic.player.audio.dsp.DspSettingsStore
+import com.mokamusic.player.audio.dsp.RouteClass
+import com.mokamusic.player.audio.dsp.classifyRoute
 import com.mokamusic.player.data.AudioTechnicalMetadata
 import com.mokamusic.player.data.AudioTechnicalMetadataReader
 import com.mokamusic.player.data.MusicLibraryRepository
@@ -44,13 +54,21 @@ data class MokaUiState(
     val hasPrevious: Boolean = false,
     val hasNext: Boolean = false,
     val shuffleEnabled: Boolean = false,
-    val repeatMode: Int = Player.REPEAT_MODE_OFF
+    val repeatMode: Int = Player.REPEAT_MODE_OFF,
+    val queue: List<MusicTrack> = emptyList(),
+    val currentQueueIndex: Int = -1,
+    val favoriteIds: Set<Long> = emptySet(),
+    val dspMeters: DspMeterSnapshot = DspMeterSnapshot(),
+    val activeRouteProfile: RouteClass? = null
 )
 
 class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = MusicLibraryRepository(application)
     private val technicalReader = AudioTechnicalMetadataReader(application)
     private val outputInspector = AudioOutputInspector(application)
+    private val dspStore = DspSettingsStore(application)
+    private val deviceProfiles = DspDeviceProfileStore(application)
+    private val favoritePrefs = application.getSharedPreferences("moka_favorites", android.content.Context.MODE_PRIVATE)
 
     private val _uiState = MutableStateFlow(MokaUiState())
     val uiState: StateFlow<MokaUiState> = _uiState.asStateFlow()
@@ -61,6 +79,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingQueueIds: List<Long>? = null
     private var pendingShuffle: Boolean = false
     private var technicalJob: Job? = null
+    private var lastProfileRoute: RouteClass? = null
 
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) = syncPlaybackState()
@@ -69,16 +88,20 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = syncPlaybackState()
         override fun onRepeatModeChanged(repeatMode: Int) = syncPlaybackState()
         override fun onAvailableCommandsChanged(availableCommands: Player.Commands) = syncPlaybackState()
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) = syncPlaybackState()
     }
 
     init {
         viewModelScope.launch {
             val cached = runCatching { repository.loadCached() }.getOrDefault(emptyList())
             val stale = runCatching { repository.isCacheStale() }.getOrDefault(false)
+            val favorites = favoritePrefs.getStringSet("ids", emptySet())
+                .orEmpty().mapNotNull { it.toLongOrNull() }.toSet()
             _uiState.value = _uiState.value.copy(
                 tracks = cached,
                 libraryInitialized = true,
-                libraryCacheStale = stale
+                libraryCacheStale = stale,
+                favoriteIds = favorites
             )
             syncPlaybackState(readTechnical = true)
         }
@@ -225,6 +248,122 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun playNext(track: MusicTrack) {
+        val player = controller ?: return
+        val insertAt = (player.currentMediaItemIndex + 1).coerceIn(0, player.mediaItemCount)
+        player.addMediaItem(insertAt, toMediaItem(track))
+        syncPlaybackState()
+    }
+
+    fun addToQueue(track: MusicTrack) {
+        val player = controller ?: return
+        player.addMediaItem(toMediaItem(track))
+        syncPlaybackState()
+    }
+
+    fun playQueueIndex(index: Int) {
+        val player = controller ?: return
+        if (index !in 0 until player.mediaItemCount) return
+        player.seekToDefaultPosition(index)
+        player.play()
+        syncPlaybackState(readTechnical = true)
+    }
+
+    fun removeQueueItem(index: Int) {
+        val player = controller ?: return
+        if (index !in 0 until player.mediaItemCount) return
+        player.removeMediaItem(index)
+        syncPlaybackState()
+    }
+
+    fun moveQueueItem(fromIndex: Int, toIndex: Int) {
+        val player = controller ?: return
+        if (fromIndex !in 0 until player.mediaItemCount || toIndex !in 0 until player.mediaItemCount) return
+        if (fromIndex == toIndex) return
+        player.moveMediaItem(fromIndex, toIndex)
+        syncPlaybackState()
+    }
+
+    fun clearQueueAfterCurrent() {
+        val player = controller ?: return
+        val current = player.currentMediaItemIndex
+        if (current < 0) return
+        while (player.mediaItemCount > current + 1) player.removeMediaItem(current + 1)
+        syncPlaybackState()
+    }
+
+    fun playSavedQueue(trackIds: List<Long>) {
+        val byId = _uiState.value.tracks.associateBy { it.id }
+        val tracks = trackIds.mapNotNull(byId::get)
+        if (tracks.isNotEmpty()) playQueue(tracks, false)
+    }
+
+    fun toggleFavorite(track: MusicTrack) {
+        val next = _uiState.value.favoriteIds.toMutableSet().apply {
+            if (!add(track.id)) remove(track.id)
+        }.toSet()
+        favoritePrefs.edit().putStringSet("ids", next.map(Long::toString).toSet()).apply()
+        _uiState.value = _uiState.value.copy(favoriteIds = next)
+    }
+
+    fun applyDspPreset(preset: DspPresetId) {
+        val current = dspStore.load()
+        dspStore.save(DspPresets.apply(preset, current))
+    }
+
+    fun buildDiagnostics(): String {
+        val app = getApplication<Application>()
+        val state = _uiState.value
+        val settings = dspStore.load()
+        val meters = DspRuntimeMonitor.snapshot()
+        val version = runCatching {
+            app.packageManager.getPackageInfo(app.packageName, 0).versionName
+        }.getOrNull() ?: "unknown"
+        return buildString {
+            appendLine("Moka Music Player diagnostics")
+            appendLine("Version: $version")
+            appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            appendLine("Route: ${state.output.routeLabel} / ${state.output.deviceName}")
+            appendLine("Engine: ${state.output.directEngineLabel ?: "Media3"}")
+            appendLine("DSP active: ${state.output.dspActive}")
+            appendLine("Source bit-perfect verified: ${state.output.sourceBitPerfectVerified}")
+            appendLine("USB transport verified: ${state.output.usbTransportBitPerfectVerified}")
+            state.currentTrack?.let { t ->
+                appendLine("Track: ${t.artist} — ${t.title}")
+                appendLine("Album: ${t.album}")
+                appendLine("Format: ${t.formatLabel} ${t.bitDepth ?: "?"}-bit ${t.sampleRateHz ?: "?"} Hz")
+            }
+            appendLine()
+            appendLine("DSP settings")
+            appendLine("Master: ${settings.masterEnabled}")
+            appendLine("Auto headroom: ${settings.autoHeadroomEnabled}")
+            appendLine("Normalization: ${settings.normalizationEnabled}")
+            appendLine("EQ: ${settings.eqEnabled} / ${settings.eqMode.label}")
+            appendLine("DDC: ${settings.ddcEnabled} / ${settings.ddcName ?: "none"}")
+            appendLine("Convolver: ${settings.convolverEnabled} / ${settings.convolverName ?: "none"}")
+            appendLine("Limiter: ${settings.limiterEnabled} threshold=${settings.limiterThresholdDb} dB release=${settings.limiterReleaseMs} ms")
+            appendLine()
+            appendLine("DSP telemetry")
+            appendLine("Engine: ${meters.engine}")
+            appendLine("Automatic headroom: ${meters.automaticHeadroomDb} dB")
+            appendLine("Input peak: ${meters.inputPeakDbfs} dBFS")
+            appendLine("Output peak: ${meters.outputPeakDbfs} dBFS")
+            appendLine("Near/full-scale samples: ${meters.clippedSamples}")
+            appendLine("DSP throughput: ${meters.throughputX?.let { "%.2fx".format(it) } ?: "n/a"}")
+            CrashLogStore.lastError(app)?.let {
+                appendLine()
+                appendLine("Last non-fatal error")
+                appendLine(it)
+            }
+            CrashLogStore.lastCrash(app)?.let {
+                appendLine()
+                appendLine("Last crash")
+                appendLine(it)
+            }
+        }
+    }
+
     private fun toMediaItem(track: MusicTrack): MediaItem {
         val extras = Bundle().apply {
             track.sampleRateHz?.let { putInt(AudioPathMonitor.EXTRA_SAMPLE_RATE_HZ, it) }
@@ -265,8 +404,23 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun refreshOutputStatus() {
         val status = outputInspector.inspect()
-        if (status != _uiState.value.output) {
-            _uiState.value = _uiState.value.copy(output = status)
+        val route = classifyRoute(status.routeLabel)
+        if (deviceProfiles.enabled && route != lastProfileRoute) {
+            lastProfileRoute = route
+            val preset = deviceProfiles.get(route)
+            if (preset != DspPresetId.KEEP) {
+                dspStore.save(DspPresets.apply(preset, dspStore.load()))
+            }
+        } else if (lastProfileRoute == null) {
+            lastProfileRoute = route
+        }
+        val meters = DspRuntimeMonitor.snapshot()
+        if (status != _uiState.value.output || meters != _uiState.value.dspMeters || route != _uiState.value.activeRouteProfile) {
+            _uiState.value = _uiState.value.copy(
+                output = status,
+                dspMeters = meters,
+                activeRouteProfile = route
+            )
         }
     }
 
@@ -277,6 +431,14 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
             ?: _uiState.value.currentTrack?.takeIf { it.id == currentId }
 
         val changedTrack = track?.id != _uiState.value.currentTrack?.id
+        val trackById = _uiState.value.tracks.associateBy { it.id }
+        val queue = buildList {
+            for (i in 0 until player.mediaItemCount) {
+                val id = player.getMediaItemAt(i).mediaId.toLongOrNull() ?: continue
+                val queuedTrack = trackById[id] ?: continue
+                add(queuedTrack)
+            }
+        }
         _uiState.value = _uiState.value.copy(
             currentTrack = track,
             isPlaying = player.isPlaying,
@@ -285,7 +447,10 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
             hasPrevious = player.hasPreviousMediaItem(),
             hasNext = player.hasNextMediaItem(),
             shuffleEnabled = player.shuffleModeEnabled,
-            repeatMode = player.repeatMode
+            repeatMode = player.repeatMode,
+            queue = queue,
+            currentQueueIndex = player.currentMediaItemIndex,
+            dspMeters = DspRuntimeMonitor.snapshot()
         )
 
         if ((changedTrack || readTechnical) && track != null) {

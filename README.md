@@ -1,361 +1,202 @@
-# 🎧 Moka Music Player
-
-**Moka Music Player** is an experimental high-fidelity Android music player focused on local lossless playback, USB audio, source-rate preservation, and a powerful custom DSP pipeline inspired by tools such as JamesDSP and ViPER.
-
-Moka is being built for listeners who want more control over how their music reaches their headphones or DAC — without automatically resampling every track to the highest rate a device supports.
-
-> **Current status:** Alpha / active development  
-> Expect bugs, compatibility issues, and major changes between releases.
-
----
-
-## ✨ Features
-
-### High-resolution local playback
-
-- FLAC playback
-- WAV playback
-- MP3, AAC/M4A, Opus, and other Android-supported formats
-- 16-bit, 24-bit, 32-bit integer PCM support
-- 32-bit floating-point DSP output
-- Source sample-rate matching
-- High-resolution USB DAC and USB headphone support
-- Wired headphone support
-- Direct PCM playback path for supported local files
+# Moka Music Player
 
-Moka attempts to preserve the source format wherever possible rather than automatically upsampling music.
+**Moka Music Player** is an experimental high-fidelity Android music player for local audio. It focuses on source-rate-aware playback, USB/wired audio, truthful signal-path reporting, and a custom real-time DSP engine with ViPER-DDC, multimodal EQ, convolution, normalization, and output protection.
 
-For example:
+> **Current development build: v3.7.0-alpha01 — Feature / UX iteration**
+>
+> Moka is still alpha software. Audio routing, native DSP, device compatibility, and the UI are actively being developed.
 
-```text
-24-bit / 48 kHz FLAC
-        ↓
-24-bit / 48 kHz playback
-```
+## What is new in v3.7
 
-rather than:
+### Library and navigation
 
-```text
-24-bit / 48 kHz FLAC
-        ↓
-forced 192 kHz output
-```
+- **Albums are sorted by album artist/artist first, then album title.**
+- Artist pages now group tracks by album instead of presenting one flat track list.
+- Added **Recently Added** and **Favorites** filters.
+- Search covers track title, artist, album, and genre.
+- Music-library cache schema was updated; the first v3.7 launch may perform one clean MediaStore rescan.
 
----
+### Notification → Now Playing
 
-# 🎛️ Moka DSP
+Tapping the Android media notification/card now opens Moka directly to **Now Playing**. Play, pause, previous, and next remain normal media actions and do not force the app into the foreground.
 
-Moka includes its own high-resolution DSP engine for local music playback.
+### New Moka identity
 
-The current DSP pipeline is:
+v3.7 includes the new dark espresso / bronze **Moka** launcher icon as both legacy and adaptive Android icon resources.
 
-```text
-Source audio
-     ↓
-Volume normalization
-     ↓
-ViPER-DDC
-     ↓
-Multimodal EQ
-     ↓
-IRS Convolver
-     ↓
-Output limiter
-     ↓
-32-bit float PCM
-     ↓
-Android AudioTrack
-     ↓
-USB DAC / headphones
-```
+### Better Now Playing and queue controls
 
-DSP processing intentionally modifies the original samples, so Moka does **not** report playback as bit-perfect while DSP is enabled.
+Now Playing now exposes:
 
----
+- favorite / unfavorite
+- queue access
+- Play Next
+- Add to Queue
+- remove queue item
+- move queue item up/down
+- clear upcoming tracks
+- save the current queue as a local named playlist
 
-## 🎚️ Multimodal Equalizer
+Saved queues store MediaStore IDs only. Moka does not modify the audio files.
 
-Moka includes a 15-band equalizer based on the frequency layout used by JamesDSP:
+### Signal-path view
 
-| Band | Frequency |
-|---|---:|
-| 1 | 25 Hz |
-| 2 | 40 Hz |
-| 3 | 63 Hz |
-| 4 | 100 Hz |
-| 5 | 160 Hz |
-| 6 | 250 Hz |
-| 7 | 400 Hz |
-| 8 | 630 Hz |
-| 9 | 1 kHz |
-| 10 | 1.6 kHz |
-| 11 | 2.5 kHz |
-| 12 | 4 kHz |
-| 13 | 6.3 kHz |
-| 14 | 10 kHz |
-| 15 | 16 kHz |
+The expanded signal-path panel now makes the active playback chain visible instead of only showing a generic Hi-Fi label. Depending on the current route and DSP state it can show:
 
-Supported modes include:
+- source format / sample rate / bit depth
+- direct PCM / Media3 path
+- USB and source bit-perfect verification state
+- automatic DSP headroom
+- normalization
+- DDC profile
+- EQ mode
+- impulse response / convolver
+- limiter threshold
+- DSP engine
+- input peak
+- output peak
+- near/full-scale sample count
+- measured DSP throughput
 
-- FIR Minimum Phase
-- IIR 4th order
-- IIR 6th order
-- IIR 8th order
-- IIR 10th order
-- IIR 12th order
+Moka only reports **source bit-perfect** when the samples and verified output path support that claim. DSP deliberately changes PCM, so source bit-perfect is false while DSP is active.
 
-FIR interpolation options include:
+## DSP safety improvements
 
-- PCHIP
-- Modified Hiroshi Akima / MAKIMA
+### Automatic headroom
 
----
+v3.7 adds **Automatic headroom**, enabled by default for DSP playback.
 
-## 🎧 ViPER-DDC
+At DSP-chain setup, Moka estimates positive gain contributed by enabled stages, including:
 
-Moka supports ViPER-style `.vdc` headphone correction files.
+- multimodal EQ boosts
+- ViPER-DDC response
+- IRS/convolver response and convolver gain
+- fixed normalization gain / normalization preamp
 
-Example:
+It then applies conservative pre-DSP attenuation plus a small safety margin before the real-time chain. The estimate is setup-time work; it does not add frequency-response calculations to the audio thread.
 
-```text
-SR_44100:...
-SR_48000:...
-```
+This is especially useful for aggressive EQ + IRS combinations where multiple positive-gain stages can otherwise drive the limiter continuously.
 
-Moka parses the biquad filter sections and selects or reconstructs the appropriate response for the playback sample rate.
+### Live DSP telemetry
 
-This allows headphone-specific correction profiles to be used directly inside the player.
+Moka now tracks live DSP information for Now Playing and diagnostics:
 
----
+- native/Kotlin engine label
+- automatic headroom applied
+- input peak in dBFS
+- output peak in dBFS
+- near/full-scale sample count
+- DSP processing speed relative to real time
 
-## 🌊 IRS Convolver
+### DSP presets
 
-Moka supports impulse-response convolution using:
+New one-tap presets:
 
-- `.irs`
-- WAV impulse responses
-- compatible decoded FLAC impulse responses
+- **Moka Reference** — FIR minimum-phase / MAKIMA favorite curve, automatic headroom, reference limiter settings, and selected DDC/IRS when available
+- **Safe DSP** — conservative limiter + automatic headroom with corrective filters disabled
+- **DSP off / pure** — disables the DSP master path
 
-Supported impulse response formats include:
+### Output-device profiles
 
-- 16-bit PCM
-- 24-bit PCM
-- 32-bit PCM
-- 32-bit floating point
-- mono
-- stereo
-- basic true-stereo impulse responses
+Optional route profiles can automatically select a DSP preset when Moka moves between:
 
-Impulse responses are automatically resampled when needed to match the song's playback sample rate.
+- USB
+- Bluetooth
+- wired headphones
+- speaker / other
 
----
+This behavior is **off by default**. `Keep current` is the default route action so connecting a device does not unexpectedly alter the signal chain.
 
-## 🔊 Volume Normalization
+## Diagnostics and alpha testing
 
-Moka includes optional volume normalization to reduce large loudness differences between songs.
+The new **More** screen includes:
 
-Supported methods include:
+- app/version information
+- current output route and engine
+- DSP state
+- saved queue playlists
+- GitHub link
+- one-tap **Export diagnostics**
+- first-run screen reset
 
-- ReplayGain track gain
-- R128 track gain
-- adaptive fallback for music without loudness metadata
-- adjustable normalization preamp
+The exported text includes device/Android version, playback route, source information, bit-perfect state, DSP settings, live DSP meters, throughput, and Moka's most recent stored crash/non-fatal error when present.
 
-Unlike a fast automatic gain control, Moka prefers a stable per-track gain when loudness metadata is available.
-
-This helps preserve the dynamics within a song while making different albums and tracks play at a more consistent perceived volume.
-
----
-
-## 🛡️ Output Limiter
-
-The DSP chain includes an output limiter with configurable:
-
-- threshold
-- release time
-- post gain
-
-The limiter runs at the end of the DSP chain to protect against clipping caused by EQ boosts, DDC correction, convolution, normalization, or combined processing.
-
-Recent builds use a look-ahead limiter for smoother transient handling.
-
----
-
-# 🚀 Native DSP Engine
-
-Moka's newer DSP engine uses native C++ through Android's NDK/JNI.
-
-Moving the heavy real-time DSP work out of Kotlin allows significantly better performance for:
-
-- FIR filtering
-- convolution
-- DDC
-- high-resolution PCM processing
-- real-time output
-
-Where possible, compatible FIR stages are combined to reduce the amount of real-time convolution work.
-
-Certain simple impulse responses can also use optimized delay/gain processing instead of a full FFT convolution pass.
-
----
-
-# 🔌 USB Audio
-
-USB audio is one of Moka's primary development targets.
-
-Moka attempts to inspect the real Android audio path, including:
-
-- source sample rate
-- source bit depth
-- actual `AudioTrack` format
-- output route
-- USB mixer capabilities
-- Android bit-perfect mixer support where available
-
-Possible playback indicators include:
-
-```text
-USB · BIT PERFECT
-```
-
-```text
-MOKA · DIRECT PCM
-```
-
-```text
-MOKA · HI-RES DSP
-```
-
-### Bit-perfect playback
-
-Moka only reports **bit-perfect** when it can verify that the source and output path match appropriately.
-
-When DSP is enabled, playback is intentionally **not** bit-perfect because the PCM samples are being modified.
-
----
-
-# 📚 Music Library
-
-Moka scans Android's MediaStore and builds a local music library containing:
-
-- Tracks
-- Albums
-- Artists
-- Genres
-- Embedded artwork
-- Track numbers
-- Disc numbers
-- Album artists
-- Dates / years
-
-Moka also reads metadata directly from supported FLAC and WAV files when possible.
-
-The library index is cached locally, so Moka does not need to completely rescan the device every time the app opens.
-
-A manual rescan remains available when music has changed.
-
----
-
-# ▶️ Playback
-
-Moka uses Android Media3 for its media session and system integration.
-
-Supported controls include:
-
-- Play / pause
-- Previous / next
-- Seek
-- ±10 second seek
-- Shuffle
-- Repeat
-- Queues
-- Album queues
-- Artist queues
-- Genre queues
-
-Background playback supports:
-
-- Notification controls
-- Lock-screen controls
-- Bluetooth media buttons
-- Audio focus
-- Headphone disconnect handling
-- Screen-off playback
-
----
-
-# 📱 Requirements
-
-Recommended:
-
-- Android 14 or newer
-- USB-C headphones or USB DAC for high-resolution testing
-- Local FLAC or WAV files
-
-Minimum supported Android version:
-
-```text
-Android 8.0 / API 26
-```
-
-Some advanced USB and mixer features require newer Android versions.
-
----
-
-# 📦 Installing an Early Release
-
-Download the APK from the project's **GitHub Releases** page.
-
-Because Moka is not currently distributed through Google Play, Android may ask for permission to install applications from your browser or file manager.
-
-Early releases are signed with Moka's release signing certificate.
-
-If you previously installed a developer/debug build of Moka, Android may report:
-
-```text
-INSTALL_FAILED_UPDATE_INCOMPATIBLE
-```
-
-This happens because debug builds and public release builds use different signing certificates.
-
-You will need to uninstall the old development build once before installing the release-signed version.
-
-Your music files will not be deleted, but Moka's application settings and cache will be reset.
-
----
-
-# 🛠️ Building From Source
-
-## Requirements
-
-Install:
-
-- Android Studio
-- Android SDK
-- Android SDK Platform 37
-- Android NDK
-- CMake 3.22.1
-- JDK 17
-
-The project currently uses:
-
-```text
-compileSdk 37
-targetSdk 36
-minSdk 26
-Java 17
-Media3
-Jetpack Compose
-Kotlin
-C++ / JNI
-```
-
-Clone the repository:
+For lower-level audio debugging you can still capture:
 
 ```bash
-git clone <repository-url>
-cd MokaMusicPlayer
+adb logcat -c
+# Reproduce the playback problem.
+adb logcat -d | grep -iE \
+  "MokaAudio|MokaDSP|MokaNativeDSP|AudioTrack|AudioFlinger|underrun|BUFFER TIMEOUT" \
+  > moka-audio.txt
 ```
+
+## Playback architecture
+
+With DSP disabled, compatible local content can use Moka's direct PCM path. Media3 remains the fallback and owns the Android media session, queue, background playback, notification, lock-screen controls, and broad codec compatibility.
+
+With DSP enabled:
+
+```text
+Local audio
+    ↓
+Decode to PCM
+    ↓
+Automatic headroom
+    ↓
+Volume normalization
+    ↓
+ViPER-DDC
+    ↓
+Multimodal EQ
+    ↓
+IRS convolver
+    ↓
+Limiter / post gain
+    ↓
+32-bit float PCM
+    ↓
+AudioTrack
+    ↓
+USB / wired / Bluetooth / Android output
+```
+
+The heavy real-time FIR/convolver/DDC path can run through the native C++ engine. Compatible FIR EQ + IRS stages are combined at setup to reduce real-time FFT work, and sparse single-tap IRs can use an optimized delay/gain path.
+
+## Gapless status
+
+Media3 playback retains its normal gapless behavior when decoder/container metadata supports it.
+
+**True seamless handoff between tracks owned by Moka's custom direct PCM/native-DSP engine is still experimental.** v3.7 does not pretend that path is gapless. Proper support requires preparing and buffering the next direct track before the current AudioTrack reaches end of stream.
+
+## Supported DSP features
+
+- ViPER-DDC `.vdc`
+- 15-band JamesDSP-style multimodal EQ
+- FIR minimum phase
+- PCHIP / MAKIMA interpolation
+- IIR 4th / 6th / 8th / 10th / 12th order compatibility path
+- IRS/WAV/compatible decoded impulse responses
+- native partitioned convolution
+- ReplayGain / R128-style fixed normalization metadata
+- adaptive fallback normalization
+- limiter / release / post gain
+- automatic headroom
+- live DSP telemetry
+- route-based DSP presets
+
+## Build requirements
+
+- Android Studio / Android SDK
+- compileSdk **37**
+- targetSdk **36**
+- minSdk **26**
+- JDK **17**
+- Android NDK
+- CMake **3.22.1**
+- Media3 **1.11.1**
+
+Open the project directory containing `settings.gradle.kts` and `app/`.
 
 Build a debug APK:
 
@@ -363,162 +204,74 @@ Build a debug APK:
 ./gradlew clean :app:assembleDebug
 ```
 
-Output:
-
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
-
-Install it:
+Build a release APK:
 
 ```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+./gradlew clean :app:assembleRelease
 ```
 
----
+### Release signing
 
-## Native build problems
+The project supports an optional root `keystore.properties` file. It is ignored by Git and must **never** be committed.
 
-If CMake or Ninja gets into a bad state:
+Example:
+
+```properties
+storeFile=/home/you/.android-keys/moka-release.jks
+storePassword=YOUR_PASSWORD
+keyAlias=moka
+keyPassword=YOUR_PASSWORD
+```
+
+When the file exists, `assembleRelease` uses that signing config. Without it, Gradle produces an unsigned release APK.
+
+Verify a signed APK with:
 
 ```bash
-rm -rf app/.cxx
-rm -rf app/build/intermediates/cxx
-
-./gradlew --stop
-./gradlew clean :app:assembleDebug --no-build-cache
+APKSIGNER=$(find ~/Android/Sdk/build-tools -name apksigner -type f | sort -V | tail -1)
+"$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
 ```
 
-If included in your checkout, you can also use:
+## Native-build recovery
+
+If CMake/Ninja state becomes stale:
 
 ```bash
 ./fix-native-build.sh
 ```
 
----
-
-# 🧪 Reporting Bugs
-
-Moka is currently in alpha, so bug reports are extremely useful.
-
-When reporting audio problems, please include:
-
-- Phone model
-- Android version
-- USB DAC / headphones
-- File type
-- Sample rate
-- Bit depth
-- Whether DSP was enabled
-- Which DSP modules were enabled
-- Steps to reproduce
-
-For audio glitches or stuttering:
+or manually:
 
 ```bash
-adb logcat -c
+rm -rf app/.cxx app/build/intermediates/cxx
+./gradlew --stop
+./gradlew clean :app:assembleDebug --no-build-cache
 ```
 
-Reproduce the problem, then:
+## Installing development builds
 
 ```bash
-adb logcat -d | grep -iE \
-"MokaAudio|MokaDSP|MokaNativeDSP|AudioTrack|AudioFlinger|underrun|BUFFER TIMEOUT" \
-> moka-audio.txt
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Attach `moka-audio.txt` to the GitHub issue.
+A debug-signed APK cannot update a release-signed installation with the same package ID. If switching signing identities, Android requires the old installation to be removed first.
 
----
+## Publish a GitHub prerelease from the terminal
 
-# ⚠️ Current Limitations
+After `keystore.properties` and `gh auth` are configured, v3.7 includes a release helper:
 
-Moka is still experimental.
+```bash
+./scripts/publish-release.sh v3.7.0-alpha01
+```
 
-Known areas under active development include:
+The helper requires a clean working tree, builds `assembleRelease`, refuses to publish an unsigned APK, verifies the signing certificate with `apksigner`, pushes the current branch/tag, and creates or updates the GitHub prerelease asset. The staged `dist/` APK is ignored by Git.
 
-- USB routing differences between Android devices
-- Native DSP optimization
-- Convolver performance
-- DAC compatibility
-- FLAC decoding behavior across Android vendors
-- DSP hot switching
-- Loudness analysis
-- Error recovery
-- UI refinement
-- Battery and thermal optimization
-- Apple Music integration research
+## Privacy
 
-Do not assume an alpha release is suitable for critical or professional playback environments.
+Moka is local-first. Local music and DSP profile files stay on the device and are not uploaded for playback or DSP processing.
 
----
-
-# 🍎 Apple Music
-
-Apple provides MusicKit and the Apple Music API, and integration is being investigated.
-
-Possible future functionality includes:
-
-- Apple Music authentication
-- Catalog search
-- Library browsing
-- Playlists
-- Recommendations
-- Recently played music
-
-Apple Music's protected streaming audio is separate from Moka's local PCM/DSP engine, so custom DDC, EQ and IRS processing is currently focused on local audio.
-
----
-
-# 🗺️ Roadmap
-
-Potential future work includes:
-
-- Further native DSP optimization
-- Better ReplayGain / R128 analysis
-- Album loudness normalization
-- DSP presets
-- Importable headphone profiles
-- DSP profile auto-selection by output device
-- Native FLAC decoding
-- More accurate USB DAC capability detection
-- Improved bit-perfect verification
-- Gapless playback
-- Crossfade as an optional non-bit-perfect mode
-- Apple Music browsing
-- Automated signed GitHub releases
-- Better crash diagnostics
-- Performance and battery telemetry
-- Additional JamesDSP-compatible processing modules
-
----
-
-# 🔐 Privacy
-
-Moka is designed primarily as a local music player.
-
-Your local music files remain on your device.
-
-Moka does not need to upload your local music collection in order to play or process it.
-
-DSP profile files such as `.vdc` and `.irs` are also processed locally.
-
----
-
-# ❤️ Project Philosophy
-
-Moka is built around a simple idea:
+## Project philosophy
 
 > **Play the source faithfully when possible, and give the listener precise control when they intentionally want to change it.**
 
-Pure playback should stay pure.
-
-DSP playback should be powerful.
-
-And the app should be honest about which one it is doing.
-
----
-
-## Moka Music Player
-
-**Local music. High-resolution playback. Your signal path.**
+Pure playback should stay pure. DSP playback should be powerful. Moka should be honest about which path is active.

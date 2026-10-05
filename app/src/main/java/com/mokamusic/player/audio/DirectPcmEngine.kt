@@ -21,6 +21,7 @@ import androidx.annotation.RequiresApi
 import androidx.media3.common.MediaItem
 import com.mokamusic.player.audio.dsp.DspChain
 import com.mokamusic.player.audio.dsp.DspFileLoader
+import com.mokamusic.player.audio.dsp.DspHeadroomEstimator
 import com.mokamusic.player.audio.dsp.DspSettingsStore
 import com.mokamusic.player.audio.dsp.DspStreamAdapter
 import com.mokamusic.player.audio.dsp.NativeDspChain
@@ -613,9 +614,20 @@ class DirectPcmEngine(
             }
         )
 
-        Log.i(AUDIO_LOG_TAG, "DSP engine=${chain.implementationLabel}, block=${chain.blockSize} frames")
+        val automaticHeadroomDb = DspHeadroomEstimator.estimateDb(
+            sampleRate = sampleRate,
+            settings = settings,
+            ddc = ddc,
+            irs = irs,
+            normalizationGainDb = normalizationGainDb
+        )
+        Log.i(
+            AUDIO_LOG_TAG,
+            "DSP engine=${chain.implementationLabel}, block=${chain.blockSize} frames, " +
+                "autoHeadroom=${"%.1f".format(automaticHeadroomDb)} dB"
+        )
         AudioPathMonitor.beginDirectPath("Moka DSP · ${chain.implementationLabel} · 32-bit float")
-        return DspStreamAdapter(chain, channels, sampleRate)
+        return DspStreamAdapter(chain, channels, sampleRate, automaticHeadroomDb)
     }
 
     private fun startTrackIfRequested(track: AudioTrack): Boolean {

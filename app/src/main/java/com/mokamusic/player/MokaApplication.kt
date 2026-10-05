@@ -38,6 +38,10 @@ object CrashLogStore {
         context.filesDir.resolve(CRASH_FILE).takeIf { it.exists() }?.readText()
     }.getOrNull()
 
+    fun lastError(context: Context): String? = runCatching {
+        context.filesDir.resolve(ERROR_FILE).takeIf { it.exists() }?.readText()
+    }.getOrNull()
+
     private fun write(context: Context, fileName: String, prefix: String, throwable: Throwable) {
         val sw = StringWriter()
         throwable.printStackTrace(PrintWriter(sw))

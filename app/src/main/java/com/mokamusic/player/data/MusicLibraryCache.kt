@@ -38,6 +38,7 @@ class MusicLibraryCache(context: Context) {
                             mimeType = o.nullableString("mimeType"),
                             sizeBytes = o.optLong("sizeBytes"),
                             relativePath = o.nullableString("relativePath"),
+                            dateAddedEpochSeconds = o.optLong("dateAddedEpochSeconds", 0L),
                             albumArtist = o.nullableString("albumArtist"),
                             trackNumber = o.nullableInt("trackNumber"),
                             discNumber = o.nullableInt("discNumber"),
@@ -72,6 +73,7 @@ class MusicLibraryCache(context: Context) {
                     putNullable("mimeType", t.mimeType)
                     put("sizeBytes", t.sizeBytes)
                     putNullable("relativePath", t.relativePath)
+                    put("dateAddedEpochSeconds", t.dateAddedEpochSeconds)
                     putNullable("albumArtist", t.albumArtist)
                     putNullable("trackNumber", t.trackNumber)
                     putNullable("discNumber", t.discNumber)
@@ -98,7 +100,7 @@ class MusicLibraryCache(context: Context) {
 
     suspend fun clear() = withContext(Dispatchers.IO) { file.delete() }
 
-    private companion object { const val SCHEMA = 1 }
+    private companion object { const val SCHEMA = 2 }
 }
 
 private fun JSONObject.putNullable(key: String, value: Any?) {

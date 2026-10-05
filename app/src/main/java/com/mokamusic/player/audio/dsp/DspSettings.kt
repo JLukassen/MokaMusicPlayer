@@ -23,6 +23,7 @@ data class DspSettings(
     val limiterThresholdDb: Float = -12f,
     val limiterReleaseMs: Float = 120f,
     val postGainDb: Float = 0f,
+    val autoHeadroomEnabled: Boolean = true,
     val normalizationEnabled: Boolean = false,
     val normalizationAdaptiveFallback: Boolean = true,
     val normalizationPreampDb: Float = 0f,
@@ -68,6 +69,7 @@ class DspSettingsStore(context: Context) {
             limiterThresholdDb = prefs.getFloat(KEY_LIMITER_THRESHOLD, -12f),
             limiterReleaseMs = prefs.getFloat(KEY_LIMITER_RELEASE, 120f),
             postGainDb = prefs.getFloat(KEY_POST_GAIN, 0f),
+            autoHeadroomEnabled = prefs.getBoolean(KEY_AUTO_HEADROOM, true),
             normalizationEnabled = prefs.getBoolean(KEY_NORMALIZATION, false),
             normalizationAdaptiveFallback = prefs.getBoolean(KEY_NORMALIZATION_ADAPTIVE, true),
             normalizationPreampDb = prefs.getFloat(KEY_NORMALIZATION_PREAMP, 0f),
@@ -92,6 +94,7 @@ class DspSettingsStore(context: Context) {
             .putFloat(KEY_LIMITER_THRESHOLD, settings.limiterThresholdDb)
             .putFloat(KEY_LIMITER_RELEASE, settings.limiterReleaseMs)
             .putFloat(KEY_POST_GAIN, settings.postGainDb)
+            .putBoolean(KEY_AUTO_HEADROOM, settings.autoHeadroomEnabled)
             .putBoolean(KEY_NORMALIZATION, settings.normalizationEnabled)
             .putBoolean(KEY_NORMALIZATION_ADAPTIVE, settings.normalizationAdaptiveFallback)
             .putFloat(KEY_NORMALIZATION_PREAMP, settings.normalizationPreampDb)
@@ -116,6 +119,7 @@ class DspSettingsStore(context: Context) {
         const val KEY_LIMITER_THRESHOLD = "limiter_threshold"
         const val KEY_LIMITER_RELEASE = "limiter_release"
         const val KEY_POST_GAIN = "post_gain"
+        const val KEY_AUTO_HEADROOM = "auto_headroom"
         const val KEY_NORMALIZATION = "normalization"
         const val KEY_NORMALIZATION_ADAPTIVE = "normalization_adaptive"
         const val KEY_NORMALIZATION_PREAMP = "normalization_preamp"

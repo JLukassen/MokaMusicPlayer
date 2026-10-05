@@ -14,6 +14,7 @@ data class MusicTrack(
     val mimeType: String?,
     val sizeBytes: Long,
     val relativePath: String?,
+    val dateAddedEpochSeconds: Long = 0L,
     val albumArtist: String? = null,
     val trackNumber: Int? = null,
     val discNumber: Int? = null,
