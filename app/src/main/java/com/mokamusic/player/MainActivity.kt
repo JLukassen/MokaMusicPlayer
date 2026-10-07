@@ -1414,7 +1414,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 )
                 Spacer(Modifier.width(16.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Moka 4.0 Beta 2", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                    Text("Moka 4.0 Beta 3", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                     Text("v$versionName · Local-first hi-fi", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                     Text("Music first. DSP when you want it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -1504,7 +1504,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "Beta 2 keeps the validated audio engine and adds incremental library refresh, automatic MediaStore updates and metadata display preferences.",
+                        "Beta 3 keeps the validated playback/DSP engine frozen while hardening offline loudness analysis with direct WAV PCM, resumable checkpoints and per-track performance diagnostics.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1647,7 +1647,7 @@ private fun LoudnessAnalysisCard(state: MokaUiState, viewModel: MokaViewModel) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Text("Offline loudness analysis", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Text(
-                "Analyze decoded local PCM for BS.1770-style K-weighted loudness when files do not provide ReplayGain/R128 tags. Results are cached; your audio files are never modified.",
+                "Analyze local PCM for BS.1770-style K-weighted loudness when ReplayGain/R128 coverage is incomplete. WAV uses a direct PCM fast path; results checkpoint as the scan progresses and your audio files are never modified.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1679,7 +1679,7 @@ private fun LoudnessAnalysisCard(state: MokaUiState, viewModel: MokaViewModel) {
                 ) { Text("Clear analysis") }
             }
             Text(
-                "The scanner pauses playback to avoid competing with the real-time decoder. Track and album gains target -18 LUFS; inter-sample peak is diagnostic and explicitly reported as an estimate.",
+                "The scanner pauses playback to avoid competing with playback. Fully tagged albums are skipped, cached results resume instantly, and Track/Album gains target -18 LUFS. Inter-sample peak remains an estimate.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

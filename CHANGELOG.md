@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.0.0-beta03 — Loudness Analysis Hardening
+- Keep the validated playback, USB safety and real-time DSP architecture unchanged.
+- Add a direct RIFF/WAV PCM loudness-analysis path instead of sending uncompressed WAV through Android's `c2.android.raw.decoder`.
+- Remove the per-output-buffer `FloatArray` allocation in the MediaCodec loudness path; decoded PCM is accumulated directly from the codec `ByteBuffer`.
+- Checkpoint newly analyzed loudness records every 8 tracks so a process kill or interrupted scan resumes from saved work.
+- Skip albums whose tracks already have complete trusted ReplayGain/R128 Track + Album gain metadata.
+- Preserve complete-album semantics: if an album is missing gain coverage, its full album is analyzed before calculating offline album gain.
+- Add per-track `MokaLoudness` timing logs with decoder path, elapsed analysis time and ×-realtime speed.
+- Refresh the library after analysis so newly cached normalization gains become visible immediately.
+- Bump Android versionCode to 24 and versionName to `4.0.0-beta03`.
+
 ## 4.0.0-beta02 — Incremental Library & Metadata
 - Make long library scans resumable with periodic crash-safe cache checkpoints; leaving the app or process death no longer forces a complete restart from track 1.
 - Use MediaStore generation markers on Android 11+ for reliable cold-start detection of added/modified media, while retaining version checks for database resets.

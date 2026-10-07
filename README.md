@@ -2,7 +2,7 @@
 
 **Moka Music Player** is a local-first high-fidelity Android music player built around transparent audio routing, source-rate-aware playback and a native real-time DSP engine.
 
-> **Current development build: 4.0.0-beta02 — Beta 2**
+> **Current development build: 4.0.0-beta03 — Beta 3**
 >
 > This build intentionally removes subscription streaming from the beta scope. Moka controls the local playback/DSP path instead of depending on a streaming provider's DRM, SDK or developer program.
 
@@ -119,9 +119,13 @@ Moka supports file-provided ReplayGain/R128 metadata and two listening modes:
 - **Track** — normalize tracks independently
 - **Album** — preserve intentional loud/quiet relationships inside an album
 
-For local files without trusted loudness tags, Beta includes an optional offline scanner:
+For local files without complete trusted loudness tags, Beta includes an optional offline scanner:
 
-- decoded local PCM
+- direct RIFF/WAV PCM analysis without the Android raw MediaCodec path
+- MediaCodec decoding for compressed formats
+- per-track checkpoint/resume caching
+- fully tagged albums skipped automatically
+- per-track analysis timing in `MokaLoudness` logcat
 - K-weighting
 - BS.1770-style absolute and relative loudness gates
 - target: approximately -18 LUFS for Moka's ReplayGain-style normalization path
@@ -341,6 +345,6 @@ See `PRIVACY.md`.
 
 ## Beta status
 
-`4.0.0-beta02` builds on the published Beta 1 audio path with incremental library refresh, automatic MediaStore updates and metadata-name preferences. The implementation includes the planned local-library and hi-fi feature set, but mass-use confidence still requires the signed-build hardware/soak matrix in `BETA_CHECKLIST.md`.
+`4.0.0-beta03` keeps the validated playback/DSP path frozen while adding resumable library scanning plus a substantially faster, checkpointed offline loudness analyzer—especially for WAV/PCM libraries on Pixel-class devices. The implementation includes the planned local-library and hi-fi feature set, but mass-use confidence still requires the signed-build hardware/soak matrix in `BETA_CHECKLIST.md`.
 
 A Beta can have documented limitations; it should not have hidden behavior. Moka therefore reports what it can verify and explicitly labels estimated or unsupported paths.

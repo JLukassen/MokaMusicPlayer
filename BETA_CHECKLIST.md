@@ -47,6 +47,8 @@ The feature implementation is Beta-level. The remaining unchecked items are real
 - [x] high-quality Blackman-Harris windowed-sinc IRS resampling
 - [x] ReplayGain/R128 Track + Album metadata support
 - [x] optional offline K-weighted loudness analysis for untagged files
+- [x] direct WAV/PCM loudness fast path (no raw MediaCodec round-trip)
+- [x] resumable loudness-analysis checkpoints + per-track timing telemetry
 - [x] offline album-preserving normalization gain
 - [x] live sample peak + inter-sample/true-peak estimate
 - [x] DSP realtime-throughput telemetry
