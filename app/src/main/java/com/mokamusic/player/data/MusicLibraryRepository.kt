@@ -27,8 +27,8 @@ class MusicLibraryRepository(private val context: Context) {
     suspend fun loadCached(): List<MusicTrack> = cache.load()
 
     suspend fun isCacheStale(): Boolean = withContext(Dispatchers.IO) {
-        val saved = statePrefs.getString("media_store_version", null) ?: return@withContext true
-        val current = runCatching { MediaStore.getVersion(context) }.getOrNull() ?: return@withContext false
+        val saved = statePrefs.getString(STORE_MARKER_KEY, null) ?: return@withContext true
+        val current = currentStoreMarker() ?: return@withContext false
         saved != current
     }
 
@@ -47,8 +47,11 @@ class MusicLibraryRepository(private val context: Context) {
         }.toTypedArray()
 
         val tracks = mutableListOf<MusicTrack>()
+        val seenIds = HashSet<Long>()
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
         var completed = 0; var parsed = 0; var reused = 0
+        var lastCheckpointAtMs = android.os.SystemClock.elapsedRealtime()
+        var parsedAtLastCheckpoint = 0
 
         context.contentResolver.query(collection, projection, selection, null, null)?.use { cursor ->
             val total = cursor.count
@@ -78,6 +81,7 @@ class MusicLibraryRepository(private val context: Context) {
                 val mimeType = cursor.getString(mimeColumn)
                 val albumId = cursor.getLong(albumIdColumn)
 
+                seenIds += id
                 val previous = cachedById[id]
                 val reusable = previous != null &&
                     previous.displayName == displayName &&
@@ -127,7 +131,33 @@ class MusicLibraryRepository(private val context: Context) {
 
                 tracks += decorate(base, preference)
                 completed++
-                if (completed == total || completed % 8 == 0) onProgress(LibraryScanProgress(completed, total, parsed, reused, displayName))
+
+                val nowMs = android.os.SystemClock.elapsedRealtime()
+                val checkpointDue =
+                    !fullRescan &&
+                    completed < total &&
+                    (
+                        parsed - parsedAtLastCheckpoint >= CHECKPOINT_PARSED_TRACKS ||
+                        nowMs - lastCheckpointAtMs >= CHECKPOINT_INTERVAL_MS
+                    )
+
+                if (checkpointDue) {
+                    // Preserve cached entries that have not been visited yet. This keeps the visible
+                    // library from shrinking if Android kills Moka mid-scan. Do not advance the
+                    // MediaStore marker here; the next launch must still reconcile the library.
+                    val checkpoint = ArrayList<MusicTrack>(tracks.size + cachedById.size)
+                    checkpoint.addAll(tracks)
+                    cachedById.values.asSequence()
+                        .filter { it.id !in seenIds }
+                        .forEach(checkpoint::add)
+                    runCatching { cache.save(checkpoint.distinctBy { it.id }) }
+                    lastCheckpointAtMs = nowMs
+                    parsedAtLastCheckpoint = parsed
+                }
+
+                if (completed == total || completed % 8 == 0) {
+                    onProgress(LibraryScanProgress(completed, total, parsed, reused, displayName))
+                }
             }
         }
 
@@ -144,11 +174,36 @@ class MusicLibraryRepository(private val context: Context) {
 
         val cacheSaved = runCatching { cache.save(sorted) }.isSuccess
         if (cacheSaved) {
-            runCatching { MediaStore.getVersion(context) }.getOrNull()?.let { statePrefs.edit().putString("media_store_version", it).apply() }
+            currentStoreMarker()?.let { marker ->
+                statePrefs.edit()
+                    .putString(STORE_MARKER_KEY, marker)
+                    .remove(LEGACY_VERSION_KEY)
+                    .apply()
+            }
         } else {
-            statePrefs.edit().remove("media_store_version").apply()
+            // A partial checkpoint may exist, but never advertise it as fully synchronized.
+            statePrefs.edit().remove(STORE_MARKER_KEY).apply()
         }
         sorted
+    }
+
+    private fun currentStoreMarker(): String? = runCatching {
+        val version = MediaStore.getVersion(context)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@runCatching "v:$version"
+
+        val generations = MediaStore.getExternalVolumeNames(context)
+            .sorted()
+            .joinToString("|") { volume ->
+                "$volume:${MediaStore.getGeneration(context, volume)}"
+            }
+        "v:$version|g:$generations"
+    }.getOrNull()
+
+    private companion object {
+        const val STORE_MARKER_KEY = "media_store_marker"
+        const val LEGACY_VERSION_KEY = "media_store_version"
+        const val CHECKPOINT_PARSED_TRACKS = 12
+        const val CHECKPOINT_INTERVAL_MS = 4_000L
     }
 
     private fun decorate(track: MusicTrack, preference: MetadataNamePreference): MusicTrack {

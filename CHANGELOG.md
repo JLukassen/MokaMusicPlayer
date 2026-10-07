@@ -1,6 +1,8 @@
 # Changelog
 
 ## 4.0.0-beta02 — Incremental Library & Metadata
+- Make long library scans resumable with periodic crash-safe cache checkpoints; leaving the app or process death no longer forces a complete restart from track 1.
+- Use MediaStore generation markers on Android 11+ for reliable cold-start detection of added/modified media, while retaining version checks for database resets.
 - Add incremental MediaStore scanning: unchanged tracks reuse cached parsed metadata while only new/changed files are reopened.
 - Add debounced automatic library refresh after MediaStore changes.
 - Fix the invisible library refresh icon and add scan progress with parsed/reused counters.
