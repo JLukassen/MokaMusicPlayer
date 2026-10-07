@@ -2,7 +2,7 @@
 
 **Moka Music Player** is a local-first high-fidelity Android music player built around transparent audio routing, source-rate-aware playback and a native real-time DSP engine.
 
-> **Current release: 4.0.0-beta01 — Beta 1**
+> **Current development build: 4.0.0-beta02 — Beta 2**
 >
 > This build intentionally removes subscription streaming from the beta scope. Moka controls the local playback/DSP path instead of depending on a streaming provider's DRM, SDK or developer program.
 
@@ -341,6 +341,6 @@ See `PRIVACY.md`.
 
 ## Beta status
 
-`4.0.0-beta01` is the first build intended for broader real-device testing. The implementation includes the planned local-library and hi-fi feature set, but mass-use confidence still requires the signed-build hardware/soak matrix in `BETA_CHECKLIST.md`.
+`4.0.0-beta02` builds on the published Beta 1 audio path with incremental library refresh, automatic MediaStore updates and metadata-name preferences. The implementation includes the planned local-library and hi-fi feature set, but mass-use confidence still requires the signed-build hardware/soak matrix in `BETA_CHECKLIST.md`.
 
 A Beta can have documented limitations; it should not have hidden behavior. Moka therefore reports what it can verify and explicitly labels estimated or unsupported paths.

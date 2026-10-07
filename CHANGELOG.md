@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.0.0-beta02 — Incremental Library & Metadata
+- Add incremental MediaStore scanning: unchanged tracks reuse cached parsed metadata while only new/changed files are reopened.
+- Add debounced automatic library refresh after MediaStore changes.
+- Fix the invisible library refresh icon and add scan progress with parsed/reused counters.
+- Add a separate Full rescan action for rare forced metadata rebuilds.
+- Add File tags / Prefer English-Latin / MusicBrainz canonical name preferences.
+- Resolve and cache English MusicBrainz artist aliases when available.
+- Keep the validated Beta 1 audio/DSP routing architecture unchanged.
+
+
 ## 4.0.0-beta01 — Local-First Hi-Fi Beta
 
 ### Beta 1 launch polish (versionCode 22)

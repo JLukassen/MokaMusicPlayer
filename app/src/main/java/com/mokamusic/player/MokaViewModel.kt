@@ -2,8 +2,13 @@ package com.mokamusic.player
 
 import android.app.Application
 import android.content.ComponentName
+import android.database.ContentObserver
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -31,9 +36,12 @@ import com.mokamusic.player.audio.dsp.RouteClass
 import com.mokamusic.player.audio.dsp.classifyRoute
 import com.mokamusic.player.data.AudioTechnicalMetadata
 import com.mokamusic.player.data.AudioTechnicalMetadataReader
+import com.mokamusic.player.data.LibraryScanProgress
 import com.mokamusic.player.data.MusicLibraryRepository
 import com.mokamusic.player.data.ArtworkLoader
 import com.mokamusic.player.metadata.LibraryEnricher
+import com.mokamusic.player.metadata.MetadataNamePreference
+import com.mokamusic.player.metadata.MetadataNamePreferenceStore
 import com.mokamusic.player.metadata.OnlineMetadataStore
 import com.mokamusic.player.model.MusicTrack
 import com.mokamusic.player.playback.PlaybackService
@@ -54,6 +62,12 @@ data class MokaUiState(
     val libraryInitialized: Boolean = false,
     val libraryCacheStale: Boolean = false,
     val libraryError: String? = null,
+    val libraryScanCompleted: Int = 0,
+    val libraryScanTotal: Int = 0,
+    val libraryScanParsed: Int = 0,
+    val libraryScanReused: Int = 0,
+    val libraryScanStatus: String? = null,
+    val metadataNamePreference: MetadataNamePreference = MetadataNamePreference.FILE_TAGS,
     val controllerReady: Boolean = false,
     val currentTrack: MusicTrack? = null,
     val technical: AudioTechnicalMetadata = AudioTechnicalMetadata(),
@@ -92,6 +106,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private val favoritePrefs = application.getSharedPreferences("moka_favorites", android.content.Context.MODE_PRIVATE)
     private val libraryEnricher = LibraryEnricher(application)
     private val onlineMetadataStore = OnlineMetadataStore(application)
+    private val metadataNamePreferenceStore = MetadataNamePreferenceStore(application)
     private val loudnessStore = LoudnessAnalysisStore(application)
     private val loudnessAnalyzer = Bs1770LoudnessAnalyzer(application)
 
@@ -104,7 +119,12 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingQueueIds: List<Long>? = null
     private var pendingShuffle: Boolean = false
     private var technicalJob: Job? = null
+    private var mediaStoreRefreshJob: Job? = null
     private var lastProfileRoute: RouteClass? = null
+
+    private val mediaStoreObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean, uri: Uri?) { scheduleAutomaticLibraryRefresh() }
+    }
 
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) = syncPlaybackState()
@@ -117,6 +137,10 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
+        _uiState.value = _uiState.value.copy(metadataNamePreference = metadataNamePreferenceStore.load())
+        runCatching {
+            application.contentResolver.registerContentObserver(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, mediaStoreObserver)
+        }
         viewModelScope.launch {
             val cached = runCatching { repository.loadCached() }.getOrDefault(emptyList())
             val stale = runCatching { repository.isCacheStale() }.getOrDefault(false)
@@ -173,30 +197,72 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun scanLibrary() {
+    fun scanLibrary() = requestLibraryScan(fullRescan = false, automatic = false)
+
+    fun fullRescanLibrary() = requestLibraryScan(fullRescan = true, automatic = false)
+
+    fun setMetadataNamePreference(preference: MetadataNamePreference) {
+        if (_uiState.value.metadataNamePreference == preference) return
+        metadataNamePreferenceStore.save(preference)
+        _uiState.value = _uiState.value.copy(metadataNamePreference = preference)
+        requestLibraryScan(fullRescan = false, automatic = false)
+    }
+
+    private fun scheduleAutomaticLibraryRefresh() {
+        mediaStoreRefreshJob?.cancel()
+        mediaStoreRefreshJob = viewModelScope.launch {
+            delay(2_500)
+            if (!_uiState.value.libraryInitialized) return@launch
+            if (_uiState.value.isScanning) delay(3_000)
+            if (!_uiState.value.isScanning) requestLibraryScan(fullRescan = false, automatic = true)
+        }
+    }
+
+    private fun requestLibraryScan(fullRescan: Boolean, automatic: Boolean) {
         if (_uiState.value.isScanning) return
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isScanning = true, libraryError = null)
-            runCatching { repository.scan() }
-                .onSuccess { tracks ->
-                    _uiState.value = _uiState.value.copy(
-                        tracks = tracks,
-                        isScanning = false,
-                        libraryInitialized = true,
-                        libraryCacheStale = false,
-                        libraryError = null
-                    )
-                    refreshOutputStatus()
-                    syncPlaybackState(readTechnical = true)
+            _uiState.value = _uiState.value.copy(
+                isScanning = true, libraryError = null,
+                libraryScanCompleted = 0, libraryScanTotal = 0,
+                libraryScanParsed = 0, libraryScanReused = 0,
+                libraryScanStatus = when {
+                    fullRescan -> "Full metadata rescan…"
+                    automatic -> "Library change detected…"
+                    else -> "Checking library…"
                 }
-                .onFailure { error ->
-                    CrashLogStore.nonFatal(getApplication(), "Library scan", error)
+            )
+            runCatching {
+                repository.scan(fullRescan = fullRescan) { progress: LibraryScanProgress ->
                     _uiState.value = _uiState.value.copy(
-                        isScanning = false,
-                        libraryInitialized = true,
-                        libraryError = error.message ?: "Library scan failed"
+                        libraryScanCompleted = progress.completed,
+                        libraryScanTotal = progress.total,
+                        libraryScanParsed = progress.parsed,
+                        libraryScanReused = progress.reused,
+                        libraryScanStatus = progress.current?.let { "Checking ${it.take(70)}" }
                     )
                 }
+            }.onSuccess { tracks ->
+                val parsed = _uiState.value.libraryScanParsed
+                val reused = _uiState.value.libraryScanReused
+                _uiState.value = _uiState.value.copy(
+                    tracks = tracks, isScanning = false, libraryInitialized = true,
+                    libraryCacheStale = false, libraryError = null,
+                    libraryScanStatus = when {
+                        fullRescan -> "Full rescan complete · $parsed parsed"
+                        automatic && parsed > 0 -> "Library updated automatically · $parsed new/changed"
+                        automatic -> "Library already up to date"
+                        else -> "Library refreshed · $parsed new/changed · $reused reused"
+                    }
+                )
+                refreshOutputStatus()
+                syncPlaybackState(readTechnical = true)
+            }.onFailure { error ->
+                CrashLogStore.nonFatal(getApplication(), "Library scan", error)
+                _uiState.value = _uiState.value.copy(
+                    isScanning = false, libraryInitialized = true,
+                    libraryError = error.message ?: "Library scan failed", libraryScanStatus = null
+                )
+            }
         }
     }
 
@@ -361,7 +427,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }.onSuccess { final ->
                 ArtworkLoader.clearMemoryCache()
-                val refreshed = runCatching { repository.scan() }.getOrDefault(_uiState.value.tracks)
+                val refreshed = runCatching { repository.scan(fullRescan = false) }.getOrDefault(_uiState.value.tracks)
                 _uiState.value = _uiState.value.copy(
                     tracks = refreshed,
                     metadataEnrichmentRunning = false,
@@ -385,7 +451,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         onlineMetadataStore.clear()
         ArtworkLoader.clearMemoryCache()
         viewModelScope.launch {
-            val refreshed = runCatching { repository.scan() }.getOrDefault(_uiState.value.tracks)
+            val refreshed = runCatching { repository.scan(fullRescan = false) }.getOrDefault(_uiState.value.tracks)
             _uiState.value = _uiState.value.copy(
                 tracks = refreshed,
                 metadataEnrichmentStatus = "Online metadata cache cleared"
@@ -466,7 +532,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                 loudnessStore.putAll(withAlbumGain)
             }
 
-            val refreshed = runCatching { repository.scan() }.getOrDefault(_uiState.value.tracks)
+            val refreshed = runCatching { repository.scan(fullRescan = false) }.getOrDefault(_uiState.value.tracks)
             _uiState.value = _uiState.value.copy(
                 tracks = refreshed,
                 loudnessAnalysisRunning = false,
@@ -481,7 +547,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     fun clearLoudnessAnalysis() {
         loudnessStore.clear()
         viewModelScope.launch {
-            val refreshed = runCatching { repository.scan() }.getOrDefault(_uiState.value.tracks)
+            val refreshed = runCatching { repository.scan(fullRescan = false) }.getOrDefault(_uiState.value.tracks)
             _uiState.value = _uiState.value.copy(
                 tracks = refreshed,
                 loudnessAnalysisStatus = "Offline loudness cache cleared"
@@ -663,6 +729,8 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         if (duration == C.TIME_UNSET || duration < 0L) 0L else duration
 
     override fun onCleared() {
+        mediaStoreRefreshJob?.cancel()
+        runCatching { getApplication<Application>().contentResolver.unregisterContentObserver(mediaStoreObserver) }
         controller?.removeListener(listener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
         controller = null

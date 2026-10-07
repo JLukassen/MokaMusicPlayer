@@ -15,6 +15,7 @@ data class MusicTrack(
     val sizeBytes: Long,
     val relativePath: String?,
     val dateAddedEpochSeconds: Long = 0L,
+    val dateModifiedEpochSeconds: Long = 0L,
     val albumArtist: String? = null,
     val trackNumber: Int? = null,
     val discNumber: Int? = null,
@@ -23,16 +24,17 @@ data class MusicTrack(
     val sampleRateHz: Int? = null,
     val bitDepth: Int? = null,
     val channelCount: Int? = null,
-    /**
-     * Static per-track gain in dB for ReplayGain-style normalization.
-     * Null means no trusted file-provided loudness gain was found.
-     */
     val normalizationGainDb: Float? = null,
-    /** Album-level ReplayGain/R128 gain. Used when normalization mode is Album. */
     val albumNormalizationGainDb: Float? = null,
-    /** Optional online enrichment. Local embedded metadata always remains authoritative. */
     val musicBrainzReleaseGroupId: String? = null,
-    val onlineArtworkUrl: String? = null
+    val onlineArtworkUrl: String? = null,
+    val sourceArtist: String? = null,
+    val sourceAlbum: String? = null,
+    val sourceAlbumArtist: String? = null,
+    val sourceYear: String? = null,
+    val sourceGenre: String? = null,
+    val sourceNormalizationGainDb: Float? = null,
+    val sourceAlbumNormalizationGainDb: Float? = null
 ) {
     val formatLabel: String
         get() = when {

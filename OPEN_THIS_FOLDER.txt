@@ -1,11 +1,11 @@
-Moka Music Player 4.0.0-beta01
+Moka Music Player 4.0.0-beta02
 
 Open this folder in Android Studio or build from terminal.
 
 Recommended local test build:
   ./gradlew clean :app:testDebugUnitTest :app:assembleRelease --no-build-cache
 
-This Beta candidate is local-first. Subscription streaming has been removed from the product path.
+This Beta 2 development build is local-first. Subscription streaming has been removed from the product path.
 Key areas: Unicode library, album/artist artwork, optional MusicBrainz enrichment, native FIR/IIR/DDC/convolution,
 automatic headroom, look-ahead limiting, Track/Album normalization and offline loudness analysis.
 

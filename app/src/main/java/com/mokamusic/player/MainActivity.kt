@@ -63,6 +63,7 @@ import com.mokamusic.player.audio.dsp.DspSettingsStore
 import com.mokamusic.player.audio.dsp.EqInterpolator
 import com.mokamusic.player.audio.dsp.EqMode
 import com.mokamusic.player.audio.dsp.NormalizationMode
+import com.mokamusic.player.metadata.MetadataNamePreference
 import com.mokamusic.player.model.MusicTrack
 import com.mokamusic.player.ui.theme.MokaTheme
 
@@ -170,6 +171,11 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                     favoriteIds = state.favoriteIds,
                     isScanning = state.isScanning,
                     libraryError = state.libraryError,
+                    scanCompleted = state.libraryScanCompleted,
+                    scanTotal = state.libraryScanTotal,
+                    scanParsed = state.libraryScanParsed,
+                    scanReused = state.libraryScanReused,
+                    scanStatus = state.libraryScanStatus,
                     onRescan = viewModel::scanLibrary,
                     onPlay = viewModel::play,
                     onPlayFromQueue = viewModel::playFromQueue,
@@ -262,6 +268,11 @@ private fun LibraryScreen(
     favoriteIds: Set<Long>,
     isScanning: Boolean,
     libraryError: String?,
+    scanCompleted: Int,
+    scanTotal: Int,
+    scanParsed: Int,
+    scanReused: Int,
+    scanStatus: String?,
     onRescan: () -> Unit,
     onPlay: (MusicTrack) -> Unit,
     onPlayFromQueue: (MusicTrack, List<MusicTrack>, Boolean) -> Unit,
@@ -311,7 +322,10 @@ private fun LibraryScreen(
                 Text("Moka", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
                 Text("${tracks.size} tracks · ${albumGroups.size} albums · ${artistGroups.size} artists · ${genreGroups.size} genres")
             }
-            IconButton(onClick = onRescan) { Icon(Icons.Default.Refresh, "Rescan") }
+            IconButton(onClick = onRescan, enabled = !isScanning) {
+                if (isScanning) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                else Icon(Icons.Default.Refresh, "Refresh library", tint = MaterialTheme.colorScheme.primary)
+            }
         }
 
         PrimaryTabRow(selectedTabIndex = tab) {
@@ -320,7 +334,20 @@ private fun LibraryScreen(
             }
         }
 
-        if (isScanning) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (isScanning) {
+            val progress = if (scanTotal > 0) scanCompleted.toFloat() / scanTotal.toFloat() else 0f
+            LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+            Text(
+                "$scanCompleted/$scanTotal tracks · $scanParsed parsed · $scanReused reused",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 5.dp)
+            )
+        }
+        scanStatus?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 3.dp))
+        }
         libraryError?.let {
             Text(
                 text = "Library refresh failed: $it",
@@ -1387,7 +1414,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 )
                 Spacer(Modifier.width(16.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Moka 4.0 Beta 1", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                    Text("Moka 4.0 Beta 2", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                     Text("v$versionName · Local-first hi-fi", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                     Text("Music first. DSP when you want it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -1425,6 +1452,8 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
         }
 
         item { SectionLabel("LIBRARY & METADATA") }
+        item { LibraryMaintenanceCard(state, viewModel) }
+        item { MetadataDisplayPreferenceCard(state, viewModel) }
         item { MetadataEnrichmentCard(state, viewModel) }
         item { LoudnessAnalysisCard(state, viewModel) }
 
@@ -1475,7 +1504,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "Beta 1 includes native FIR/IIR EQ, ViPER-DDC, convolution, automatic headroom, loudness normalization, device profiles and transparent signal-path reporting.",
+                        "Beta 2 keeps the validated audio engine and adds incremental library refresh, automatic MediaStore updates and metadata display preferences.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1502,6 +1531,66 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 Text("Show welcome screen next launch")
             }
             Spacer(Modifier.height(72.dp))
+        }
+    }
+}
+
+@Composable
+private fun LibraryMaintenanceCard(state: MokaUiState, viewModel: MokaViewModel) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("Library refresh", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "Normal refresh is incremental: unchanged tracks reuse cached metadata. Moka also watches MediaStore and refreshes automatically after file-copy/indexing bursts settle.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            state.libraryScanStatus?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(enabled = !state.isScanning, onClick = viewModel::scanLibrary) {
+                    Icon(Icons.Default.Refresh, null); Spacer(Modifier.width(8.dp)); Text("Refresh")
+                }
+                OutlinedButton(enabled = !state.isScanning, onClick = viewModel::fullRescanLibrary) { Text("Full rescan") }
+            }
+            Text(
+                "Use Full rescan only when tags changed without Android updating the file modified time.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun MetadataDisplayPreferenceCard(state: MokaUiState, viewModel: MokaViewModel) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Metadata names", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "Choose how enriched artist and album names are displayed. Track titles remain your local file tags.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            MetadataNamePreference.values().forEach { preference ->
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .clickable { viewModel.setMetadataNamePreference(preference) }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = state.metadataNamePreference == preference,
+                        onClick = { viewModel.setMetadataNamePreference(preference) }
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(preference.label, fontWeight = FontWeight.SemiBold)
+                        Text(preference.description, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
         }
     }
 }

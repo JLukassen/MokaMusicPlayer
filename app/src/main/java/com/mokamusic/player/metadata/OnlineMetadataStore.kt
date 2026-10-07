@@ -13,6 +13,7 @@ data class AlbumEnrichment(
     val key: String,
     val releaseGroupId: String,
     val canonicalArtist: String? = null,
+    val englishArtist: String? = null,
     val canonicalTitle: String? = null,
     val releaseDate: String? = null,
     val primaryType: String? = null,
@@ -55,7 +56,8 @@ class OnlineMetadataStore(context: Context) {
         runCatching {
             if (!file.baseFile.exists()) return@runCatching
             val root = JSONObject(file.openRead().bufferedReader(Charsets.UTF_8).use { it.readText() })
-            if (root.optInt("schema", 0) != SCHEMA) return@runCatching
+            val schema = root.optInt("schema", 0)
+            if (schema !in 1..SCHEMA) return@runCatching
             val a = root.optJSONArray("albums") ?: return@runCatching
             for (i in 0 until a.length()) {
                 val o = a.optJSONObject(i) ?: continue
@@ -69,6 +71,7 @@ class OnlineMetadataStore(context: Context) {
                     key = key,
                     releaseGroupId = rgid,
                     canonicalArtist = o.stringOrNull("canonicalArtist"),
+                    englishArtist = o.stringOrNull("englishArtist"),
                     canonicalTitle = o.stringOrNull("canonicalTitle"),
                     releaseDate = o.stringOrNull("releaseDate"),
                     primaryType = o.stringOrNull("primaryType"),
@@ -88,6 +91,7 @@ class OnlineMetadataStore(context: Context) {
                     put("key", row.key)
                     put("releaseGroupId", row.releaseGroupId)
                     putNullable("canonicalArtist", row.canonicalArtist)
+                    putNullable("englishArtist", row.englishArtist)
                     putNullable("canonicalTitle", row.canonicalTitle)
                     putNullable("releaseDate", row.releaseDate)
                     putNullable("primaryType", row.primaryType)
@@ -109,7 +113,7 @@ class OnlineMetadataStore(context: Context) {
     }
 
     companion object {
-        private const val SCHEMA = 1
+        private const val SCHEMA = 2
 
         fun keyFor(artist: String?, album: String?): String =
             UnicodeText.key(artist) + "\u0000" + UnicodeText.key(album)

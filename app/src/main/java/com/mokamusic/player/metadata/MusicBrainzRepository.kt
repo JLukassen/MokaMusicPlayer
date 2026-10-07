@@ -22,6 +22,7 @@ class MusicBrainzRepository {
         Log.i(TAG, "lookup candidates=${groups.length()}")
 
         var best: AlbumEnrichment? = null
+        var bestRow: JSONObject? = null
         var bestRank = Int.MIN_VALUE
         for (i in 0 until groups.length()) {
             val row = groups.optJSONObject(i) ?: continue
@@ -35,6 +36,7 @@ class MusicBrainzRepository {
             if (rank <= bestRank) continue
 
             bestRank = rank
+            bestRow = row
             best = AlbumEnrichment(
                 key = OnlineMetadataStore.keyFor(artist, album),
                 releaseGroupId = id,
@@ -48,12 +50,14 @@ class MusicBrainzRepository {
             )
         }
         // MusicBrainz scores are 0..100. Refuse weak fuzzy guesses rather than attaching wrong art.
-        best?.takeIf { it.score >= 80 }.also { selected ->
-            if (selected == null) {
-                Log.i(TAG, "lookup complete result=no-strong-match")
-            } else {
-                Log.i(TAG, "lookup complete result=match score=${selected.score} releaseGroup=${selected.releaseGroupId}")
-            }
+        val selected = best?.takeIf { it.score >= 80 }
+        if (selected == null) {
+            Log.i(TAG, "lookup complete result=no-strong-match")
+            null
+        } else {
+            val englishArtist = runCatching { parseEnglishArtistCredit(bestRow) }.getOrNull()
+            Log.i(TAG, "lookup complete result=match score=${selected.score} releaseGroup=${selected.releaseGroupId}")
+            selected.copy(englishArtist = englishArtist)
         }
     }
 
@@ -74,6 +78,51 @@ class MusicBrainzRepository {
         } finally {
             connection.disconnect()
         }
+    }
+
+    private val englishArtistCache = LinkedHashMap<String, String?>()
+
+    private fun parseEnglishArtistCredit(row: JSONObject?): String? {
+        val credits = row?.optJSONArray("artist-credit") ?: return null
+        return buildList {
+            for (i in 0 until credits.length()) {
+                val c = credits.optJSONObject(i) ?: continue
+                val artist = c.optJSONObject("artist")
+                val id = artist?.optString("id")?.takeIf { it.isNotBlank() }
+                val fallback = c.optString("name").takeIf { it.isNotBlank() }
+                    ?: artist?.optString("name")?.takeIf { it.isNotBlank() }
+                val name = if (id != null) englishArtistName(id, fallback) else fallback
+                if (name != null) add(name)
+                c.optString("joinphrase").takeIf { it.isNotEmpty() }?.let(::add)
+            }
+        }.joinToString("").takeIf { it.isNotBlank() }
+    }
+
+    @Synchronized
+    private fun englishArtistName(id: String, fallback: String?): String? {
+        if (englishArtistCache.containsKey(id)) return englishArtistCache[id] ?: fallback
+        val resolved = runCatching {
+            respectRateLimit()
+            val body = getText("https://musicbrainz.org/ws/2/artist/$id?inc=aliases&fmt=json")
+            val aliases = JSONObject(body).optJSONArray("aliases")
+            var firstEnglish: String? = null
+            var primaryEnglish: String? = null
+            if (aliases != null) {
+                for (i in 0 until aliases.length()) {
+                    val alias = aliases.optJSONObject(i) ?: continue
+                    if (!alias.optString("locale").startsWith("en", ignoreCase = true)) continue
+                    val name = alias.optString("name").takeIf { it.isNotBlank() } ?: continue
+                    if (firstEnglish == null) firstEnglish = name
+                    if (alias.optBoolean("primary", false)) {
+                        primaryEnglish = name
+                        break
+                    }
+                }
+            }
+            primaryEnglish ?: firstEnglish
+        }.getOrNull()
+        englishArtistCache[id] = resolved
+        return resolved ?: fallback
     }
 
     private fun parseArtistCredit(row: JSONObject): String? {
