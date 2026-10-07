@@ -1,11 +1,12 @@
-Open THIS directory in Android Studio — the directory containing:
+Moka Music Player 4.0.0-beta01
 
-  settings.gradle.kts
-  build.gradle.kts
-  app/
+Open this folder in Android Studio or build from terminal.
 
-Do not open the parent Desktop directory.
+Recommended local test build:
+  ./gradlew clean :app:testDebugUnitTest :app:assembleRelease --no-build-cache
 
-Moka Music Player v3.7 Feature / UX Iteration
-compileSdk 37 / targetSdk 36 / minSdk 26
-Native C++ DSP + automatic headroom + signal telemetry
+This Beta candidate is local-first. Subscription streaming has been removed from the product path.
+Key areas: Unicode library, album/artist artwork, optional MusicBrainz enrichment, native FIR/IIR/DDC/convolution,
+automatic headroom, look-ahead limiting, Track/Album normalization and offline loudness analysis.
+
+Do not publish this candidate until the physical-device gates in BETA_CHECKLIST.md have been exercised.

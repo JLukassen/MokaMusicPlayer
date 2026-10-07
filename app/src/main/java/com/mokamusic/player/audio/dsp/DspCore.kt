@@ -217,15 +217,20 @@ object IrsWaveParser {
 }
 
 object SincResampler {
-    fun resample(input: FloatArray, inRate: Int, outRate: Int, halfTaps: Int = 24): FloatArray {
+    /**
+     * High-quality windowed-sinc resampler used for impulse responses and setup-time DSP assets.
+     * A 97-tap Blackman-Harris kernel has substantially better stop-band rejection than the old
+     * Hann/49-tap path. This is intentionally setup-time work, not per-track PCM resampling.
+     */
+    fun resample(input: FloatArray, inRate: Int, outRate: Int, halfTaps: Int = 48): FloatArray {
         if (inRate == outRate || input.isEmpty()) return input.copyOf()
         val outLength = max(1, ((input.size.toLong() * outRate) / inRate).toInt())
         val out = FloatArray(outLength)
         val ratio = inRate.toDouble() / outRate.toDouble()
-        val cutoff = min(1.0, outRate.toDouble() / inRate.toDouble())
+        val cutoff = min(1.0, outRate.toDouble() / inRate.toDouble()) * 0.97
         for (i in out.indices) {
             val src = i * ratio
-            val center = src.toInt()
+            val center = kotlin.math.floor(src).toInt()
             var sum = 0.0
             var wsum = 0.0
             for (k in -halfTaps..halfTaps) {
@@ -235,7 +240,10 @@ object SincResampler {
                 val px = PI * x * cutoff
                 val sinc = if (abs(px) < 1e-12) 1.0 else sin(px) / px
                 val t = abs(x) / (halfTaps + 1.0)
-                val window = if (t >= 1.0) 0.0 else 0.5 + 0.5 * cos(PI * t)
+                val window = if (t >= 1.0) 0.0 else {
+                    0.35875 + 0.48829 * cos(PI * t) +
+                        0.14128 * cos(2.0 * PI * t) + 0.01168 * cos(3.0 * PI * t)
+                }
                 val w = sinc * window * cutoff
                 sum += input[idx] * w
                 wsum += w
@@ -661,6 +669,73 @@ class MultimodalIirEq(sampleRate: Int, gains: List<Float>, mode: EqMode, private
 
 
 /**
+ * Serializes the exact Kotlin multimodal-IIR design into a compact native definition.
+ * Format: stageCount, then [overallGain, sectionCount, c1,c2,d0,d1 ...] per stage.
+ * Keeping coefficient design in one setup-time Kotlin path lets the C++ real-time engine execute
+ * the same filter family without maintaining a second user-visible tuning model.
+ */
+fun designMultimodalIirNativeDefinition(
+    sampleRate: Int,
+    gains: List<Float>,
+    mode: EqMode
+): FloatArray {
+    val order = when (mode) {
+        EqMode.IIR_4 -> 4
+        EqMode.IIR_6 -> 6
+        EqMode.IIR_8 -> 8
+        EqMode.IIR_10 -> 10
+        EqMode.IIR_12 -> 12
+        else -> return FloatArray(0)
+    }
+    val frequencies = DspSettings.EQ_FREQUENCIES_HZ
+    val output = ArrayList<Float>()
+    output += (frequencies.size - 1).toFloat()
+
+    for (i in 0 until frequencies.size - 1) {
+        val gainDb = (gains[i + 1] - gains[i]).toDouble()
+        val overallDb = if (i == 0) gains[i].toDouble() else 0.0
+        val overall = 10.0.pow(overallDb / 20.0).toFloat()
+        val designFreq = if (i == 0) frequencies[i].toDouble()
+        else (frequencies[i + 1] + frequencies[i]) * 0.5
+
+        if (abs(gainDb) < 1e-12) {
+            output += overall
+            output += 0f
+            continue
+        }
+
+        val fs = sampleRate.toDouble()
+        val sectionCount = order / 2
+        val dw = PI * (designFreq / fs - 0.5)
+        val gb = 10.0.pow((1.0 / sqrt(2.0)) * gainDb / 20.0)
+        val g = 10.0.pow(gainDb / 20.0)
+        val gR = (g * g - gb * gb) / (gb * gb - 1.0)
+        val ratOrd = gR.pow(1.0 / order)
+        val ntD = tan(dw)
+        val ntD2 = ntD * ntD
+        val stD = sin(dw)
+        val ctD = cos(dw)
+        val ratRO = gR.pow(1.0 / (2.0 * order))
+        val gP1 = g.pow(1.0 / order)
+        val gP2 = g.pow(2.0 / order)
+
+        output += overall
+        output += sectionCount.toFloat()
+        repeat(sectionCount) { idx ->
+            val si = sin((2.0 * (idx + 1) - 1.0) * PI / (2.0 * order))
+            val den1 = ntD2 + ratOrd - 2.0 * ratRO * ntD * si
+            val den2 = ratRO * ctD - si * stD
+            output += (2.0 - 2.0 * (ntD2 - ratOrd) / den1).toFloat()
+            output += ((ratRO * ctD) / den2).toFloat()
+            output += ((ratOrd + gP2 * ntD2 - 2.0 * gP1 * ratRO * ntD * si) / den1).toFloat()
+            output += ((ratRO * ctD - gP1 * si * stD) / den2).toFloat()
+        }
+    }
+    return output.toFloatArray()
+}
+
+
+/**
  * Per-track volume normalization.
  *
  * If a ReplayGain/R128-derived static gain is available, Moka applies one fixed gain to the
@@ -733,16 +808,43 @@ class PeakLimiter(sampleRate: Int, private val channels: Int, thresholdDb: Float
     private val threshold = 10.0.pow(thresholdDb / 20.0).toFloat().coerceIn(1e-4f, 1f)
     private val post = 10.0.pow(postGainDb / 20.0).toFloat()
     private val releaseCoeff = exp(-1.0 / (max(1f, releaseMs) * 0.001 * sampleRate)).toFloat()
+    private val lookaheadFrames = max(1, sampleRate / 200) // 5 ms
     private var gain = 1f
     fun reset() { gain = 1f }
+
+    /** Kotlin compatibility path mirrors the native block look-ahead limiter. */
     fun process(a: FloatArray) {
         val frames = a.size / channels
+        if (frames <= 0) return
+        val peaks = FloatArray(frames)
         for (f in 0 until frames) {
             var peak = 0f
-            for (ch in 0 until channels) peak = max(peak, abs(a[f * channels + ch]))
+            for (ch in 0 until channels) {
+                val index = f * channels + ch
+                val value = if (a[index].isFinite()) a[index] else 0f
+                a[index] = value
+                peak = max(peak, abs(value))
+            }
+            peaks[f] = peak
+        }
+
+        val deque = IntArray(frames)
+        var head = 0
+        var tail = 0
+        var right = -1
+        for (f in 0 until frames) {
+            val wantedRight = min(frames - 1, f + lookaheadFrames)
+            while (right < wantedRight) {
+                right++
+                while (tail > head && peaks[deque[tail - 1]] <= peaks[right]) tail--
+                deque[tail++] = right
+            }
+            while (head < tail && deque[head] < f) head++
+            val peak = if (head < tail) peaks[deque[head]] else peaks[f]
             val wanted = if (peak > threshold && peak > 0f) threshold / peak else 1f
             gain = if (wanted < gain) wanted else (1f - releaseCoeff) * wanted + releaseCoeff * gain
-            for (ch in 0 until channels) a[f * channels + ch] *= gain * post
+            val g = gain * post
+            for (ch in 0 until channels) a[f * channels + ch] *= g
         }
     }
 }
@@ -841,6 +943,12 @@ class DspStreamAdapter(
     private var meterFrames = 0L
     private var meterNanos = 0L
     private var meterStartedAt = System.nanoTime()
+    private var framesSinceTruePeakEstimate = Long.MAX_VALUE
+    private var lastIntersamplePeak = 0f
+
+    /** True only when replacing this adapter cannot discard a partially-filled DSP block. */
+    val isAtBlockBoundary: Boolean
+        get() = pendingFrames == 0
 
     /**
      * Feeds arbitrary-sized interleaved PCM into the fixed-block DSP chain.
@@ -891,16 +999,18 @@ class DspStreamAdapter(
 
 
     private fun processCompleteBlock(): FloatArray {
+        // Measure the whole real-time adapter cost, not just the native/JVM DSP call. In the old
+        // telemetry the expensive true-peak estimator was invisible to throughput reporting, which
+        // made a marginal 192 kHz path look healthier than it really was.
+        val started = System.nanoTime()
+
         var inputPeak = 0f
         for (v in inputBlock) inputPeak = max(inputPeak, abs(v))
         if (headroomGain != 1f) {
             for (i in inputBlock.indices) inputBlock[i] *= headroomGain
         }
 
-        val started = System.nanoTime()
         val processed = chain.processBlock(inputBlock)
-        meterNanos += System.nanoTime() - started
-        meterFrames += blockFrames.toLong()
 
         var outputPeak = 0f
         var clipped = 0L
@@ -909,15 +1019,62 @@ class DspStreamAdapter(
             outputPeak = max(outputPeak, a)
             if (a >= 0.99999f) clipped++
         }
+
+        // The inter-sample estimator is diagnostic-only and was previously run for every block.
+        // At 192 kHz that consumed a meaningful amount of CPU on the audio producer thread. Sample
+        // it four times per second instead; the UI refreshes much more slowly than that anyway.
+        framesSinceTruePeakEstimate += blockFrames.toLong()
+        if (framesSinceTruePeakEstimate >= max(1, sampleRate / 4)) {
+            lastIntersamplePeak = estimateIntersamplePeak(processed, channels, outputPeak)
+            framesSinceTruePeakEstimate = 0L
+        } else if (lastIntersamplePeak < outputPeak) {
+            lastIntersamplePeak = outputPeak
+        }
+
+        meterNanos += System.nanoTime() - started
+        meterFrames += blockFrames.toLong()
         DspRuntimeMonitor.updateBlock(
             engine = chain.implementationLabel,
             inputPeak = inputPeak,
             outputPeak = outputPeak,
+            intersamplePeak = max(outputPeak, lastIntersamplePeak),
             clippedSamples = clipped,
             headroomDb = automaticHeadroomDb
         )
         maybeLogThroughput()
         return processed
+    }
+
+    /**
+     * Lightweight 4x inter-sample peak estimate using Catmull-Rom interpolation. This is useful
+     * for catching likely DAC reconstruction overshoots without putting a full BS.1770 scanner in
+     * the real-time path. It is intentionally reported as an estimate, not standards-certified dBTP.
+     */
+    private fun estimateIntersamplePeak(a: FloatArray, channels: Int, samplePeak: Float): Float {
+        val frames = a.size / channels
+        if (frames < 4) return samplePeak
+        var peak = samplePeak
+        val fractions = floatArrayOf(0.25f, 0.5f, 0.75f)
+        for (ch in 0 until channels) {
+            for (frame in 1 until frames - 2) {
+                val ym1 = a[(frame - 1) * channels + ch]
+                val y0 = a[frame * channels + ch]
+                val y1 = a[(frame + 1) * channels + ch]
+                val y2 = a[(frame + 2) * channels + ch]
+                for (t in fractions) {
+                    val t2 = t * t
+                    val t3 = t2 * t
+                    val y = 0.5f * (
+                        2f * y0 +
+                            (-ym1 + y1) * t +
+                            (2f * ym1 - 5f * y0 + 4f * y1 - y2) * t2 +
+                            (-ym1 + 3f * y0 - 3f * y1 + y2) * t3
+                        )
+                    peak = max(peak, abs(y))
+                }
+            }
+        }
+        return peak
     }
 
     private fun copyFrames(input: FloatArray, sourceFrame: Int, frameCount: Int) {
@@ -933,7 +1090,9 @@ class DspStreamAdapter(
         meterFrames = 0L
         meterNanos = 0L
         meterStartedAt = System.nanoTime()
-        DspRuntimeMonitor.clear()
+        framesSinceTruePeakEstimate = Long.MAX_VALUE
+        lastIntersamplePeak = 0f
+        DspRuntimeMonitor.resetSignal()
     }
 
     private fun maybeLogThroughput() {
@@ -955,7 +1114,6 @@ class DspStreamAdapter(
 
     override fun close() {
         chain.close()
-        DspRuntimeMonitor.clear()
     }
 }
 

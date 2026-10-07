@@ -25,6 +25,7 @@ object NativeDspBridge {
         blockSize: Int,
         ddcCoefficients: DoubleArray,
         eqImpulse: FloatArray?,
+        iirDefinition: FloatArray?,
         ir0: FloatArray?,
         ir1: FloatArray?,
         ir2: FloatArray?,
@@ -82,11 +83,6 @@ class NativeDspChain private constructor(
             normalizationGainDb: Float?
         ): NativeDspChain? {
             if (!NativeDspBridge.available) return null
-            // Keep the Kotlin implementation for JamesDSP-style high-order IIR modes until the
-            // native engine has the exact same coefficient design. FIR minimum-phase is the
-            // expensive mode that benefits most from native acceleration.
-            if (settings.eqEnabled && settings.eqMode != EqMode.FIR_MINIMUM_PHASE) return null
-
             val ddcFlat = if (settings.ddcEnabled) {
                 ddc?.sectionsFor(sampleRate).orEmpty().flatMap { s ->
                     listOf(s.b0, s.b1, s.b2, s.a1, s.a2)
@@ -95,6 +91,10 @@ class NativeDspChain private constructor(
 
             val eqImpulse = if (settings.eqEnabled && settings.eqMode == EqMode.FIR_MINIMUM_PHASE) {
                 MinimumPhaseEqGenerator.generate(sampleRate, settings.eqGainsDb, settings.eqInterpolator)
+            } else null
+            val iirDefinition = if (settings.eqEnabled && settings.eqMode != EqMode.FIR_MINIMUM_PHASE) {
+                designMultimodalIirNativeDefinition(sampleRate, settings.eqGainsDb, settings.eqMode)
+                    .takeIf { it.isNotEmpty() }
             } else null
 
             val nativeIrs = if (settings.convolverEnabled && irs != null) {
@@ -118,6 +118,7 @@ class NativeDspChain private constructor(
                 blockSize = blockSize,
                 ddcCoefficients = ddcFlat,
                 eqImpulse = eqImpulse,
+                iirDefinition = iirDefinition,
                 ir0 = ir0,
                 ir1 = ir1,
                 ir2 = ir2,

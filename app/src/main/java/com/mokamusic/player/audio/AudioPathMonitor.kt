@@ -33,6 +33,7 @@ object AudioPathMonitor {
     const val EXTRA_CHANNEL_COUNT = "moka.channel_count"
     const val EXTRA_FORMAT_LABEL = "moka.format_label"
     const val EXTRA_NORMALIZATION_GAIN_DB = "moka.normalization_gain_db"
+    const val EXTRA_ALBUM_NORMALIZATION_GAIN_DB = "moka.album_normalization_gain_db"
 
     @Volatile private var current = AudioPathSnapshot()
 

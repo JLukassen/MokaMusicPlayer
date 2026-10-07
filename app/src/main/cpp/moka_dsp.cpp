@@ -186,6 +186,71 @@ private:
     std::vector<double> v1, v2;
 };
 
+
+struct NativeIirSection {
+    float c1, c2, d0, d1;
+};
+
+struct NativeIirStage {
+    float overallGain = 1.0f;
+    std::vector<NativeIirSection> sections;
+};
+
+class MultimodalIirEqNative {
+public:
+    MultimodalIirEqNative(std::vector<NativeIirStage> stages, int channels)
+        : stages(std::move(stages)), channels(channels) {
+        int total = 0;
+        offsets.reserve(this->stages.size());
+        for (const auto& stage : this->stages) {
+            offsets.push_back(total);
+            total += static_cast<int>(stage.sections.size());
+        }
+        totalSections = total;
+        z1.assign(static_cast<size_t>(channels * totalSections), 0.0f);
+        z2.assign(static_cast<size_t>(channels * totalSections), 0.0f);
+    }
+
+    bool empty() const { return stages.empty(); }
+
+    void reset() {
+        std::fill(z1.begin(), z1.end(), 0.0f);
+        std::fill(z2.begin(), z2.end(), 0.0f);
+    }
+
+    void process(float* interleaved, int frames) {
+        if (stages.empty()) return;
+        for (int frame = 0; frame < frames; ++frame) {
+            for (int ch = 0; ch < channels; ++ch) {
+                float x = interleaved[frame * channels + ch];
+                const int channelBase = ch * totalSections;
+                for (size_t si = 0; si < stages.size(); ++si) {
+                    const auto& stage = stages[si];
+                    for (size_t j = 0; j < stage.sections.size(); ++j) {
+                        const auto& sec = stage.sections[j];
+                        const int state = channelBase + offsets[si] + static_cast<int>(j);
+                        const float y = x - z1[state] - z2[state];
+                        x = sec.d0 * y + sec.d1 * z1[state] + z2[state];
+                        z2[state] += sec.c2 * z1[state];
+                        z1[state] += sec.c1 * y;
+                    }
+                    // Matches the Kotlin reference implementation. Only stage zero carries the
+                    // initial overall gain; subsequent stages are relative transitions.
+                    if (si == 0) x *= stage.overallGain;
+                }
+                interleaved[frame * channels + ch] = x;
+            }
+        }
+    }
+
+private:
+    std::vector<NativeIirStage> stages;
+    std::vector<int> offsets;
+    int channels = 0;
+    int totalSections = 0;
+    std::vector<float> z1, z2;
+};
+
 class MonoPartitionedConvolver {
 public:
     MonoPartitionedConvolver(const std::vector<float>& ir, int blockSize)
@@ -450,7 +515,7 @@ public:
         const int samples = blockSize * channels;
         if (!enabled) {
             if (post != 1.0f) for (int i = 0; i < samples; ++i) a[i] *= post;
-            sanitize(a, samples);
+            sanitizeFinite(a, samples);
             return;
         }
 
@@ -499,10 +564,9 @@ public:
     }
 
 private:
-    static void sanitize(float* a, int samples) {
+    static void sanitizeFinite(float* a, int samples) {
         for (int i = 0; i < samples; ++i) {
             if (!std::isfinite(a[i])) a[i] = 0.0f;
-            a[i] = std::clamp(a[i], -1.0f, 1.0f);
         }
     }
 
@@ -520,6 +584,7 @@ public:
     NativeChain(int sampleRate, int channels, int blockSize,
                 std::vector<Sos> ddc,
                 std::vector<float> eqImpulse,
+                std::vector<NativeIirStage> iirStages,
                 std::vector<std::vector<float>> irs,
                 float convolverGainDb,
                 bool normalizationEnabled, float normalizationStaticGainDb,
@@ -530,6 +595,7 @@ public:
           normalizer(sampleRate, channels, normalizationEnabled, normalizationStaticGainDb,
                      normalizationAdaptiveFallback, normalizationPreampDb),
           ddc(ddc.empty() ? nullptr : std::make_unique<SosCascade>(std::move(ddc), channels)),
+          iirEq(iirStages.empty() ? nullptr : std::make_unique<MultimodalIirEqNative>(std::move(iirStages), channels)),
           limiter(sampleRate, channels, blockSize, limiterEnabled, limiterThresholdDb,
                   limiterReleaseMs, postGainDb) {
 
@@ -561,6 +627,7 @@ public:
     void reset() {
         normalizer.reset();
         if (ddc) ddc->reset();
+        if (iirEq) iirEq->reset();
         if (convolver) convolver->reset();
         if (sparse) sparse->reset();
         limiter.reset();
@@ -571,6 +638,7 @@ public:
         if (samples != expected) return;
         normalizer.process(data, blockSize);
         if (ddc) ddc->process(data, blockSize);
+        if (iirEq) iirEq->process(data, blockSize);
         if (convolver) convolver->process(data);
         if (sparse) sparse->process(data);
         limiter.process(data);
@@ -580,6 +648,7 @@ private:
     int sampleRate, channels, blockSize;
     Normalizer normalizer;
     std::unique_ptr<SosCascade> ddc;
+    std::unique_ptr<MultimodalIirEqNative> iirEq;
     std::unique_ptr<StereoConvolver> convolver;
     std::unique_ptr<SparseDelayFilter> sparse;
     LookaheadLimiter limiter;
@@ -605,6 +674,33 @@ std::vector<Sos> getSos(JNIEnv* env, jdoubleArray coeffs) {
     return out;
 }
 
+std::vector<NativeIirStage> getNativeIir(JNIEnv* env, jfloatArray definition) {
+    if (!definition) return {};
+    const jsize n = env->GetArrayLength(definition);
+    if (n <= 0) return {};
+    std::vector<float> flat(static_cast<size_t>(n));
+    env->GetFloatArrayRegion(definition, 0, n, flat.data());
+    size_t p = 0;
+    const int stageCount = static_cast<int>(std::lround(flat[p++]));
+    if (stageCount < 0 || stageCount > 32) return {};
+    std::vector<NativeIirStage> stages;
+    stages.reserve(static_cast<size_t>(stageCount));
+    for (int stageIndex = 0; stageIndex < stageCount; ++stageIndex) {
+        if (p + 2 > flat.size()) return {};
+        NativeIirStage stage;
+        stage.overallGain = flat[p++];
+        const int sectionCount = static_cast<int>(std::lround(flat[p++]));
+        if (sectionCount < 0 || sectionCount > 16 || p + static_cast<size_t>(sectionCount) * 4 > flat.size()) return {};
+        stage.sections.reserve(static_cast<size_t>(sectionCount));
+        for (int i = 0; i < sectionCount; ++i) {
+            stage.sections.push_back({flat[p], flat[p + 1], flat[p + 2], flat[p + 3]});
+            p += 4;
+        }
+        stages.push_back(std::move(stage));
+    }
+    return stages;
+}
+
 } // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -613,6 +709,7 @@ Java_com_mokamusic_player_audio_dsp_NativeDspBridge_nativeCreate(
         jint sampleRate, jint channels, jint blockSize,
         jdoubleArray ddcCoefficients,
         jfloatArray eqImpulse,
+        jfloatArray iirDefinition,
         jfloatArray ir0, jfloatArray ir1, jfloatArray ir2, jfloatArray ir3,
         jint irChannelCount,
         jfloat convolverGainDb,
@@ -630,6 +727,7 @@ Java_com_mokamusic_player_audio_dsp_NativeDspBridge_nativeCreate(
         }
         auto ddc = getSos(env, ddcCoefficients);
         auto eq = getFloatArray(env, eqImpulse);
+        auto iir = getNativeIir(env, iirDefinition);
         std::vector<std::vector<float>> irs;
         if (irChannelCount > 0 && ir0) irs.push_back(getFloatArray(env, ir0));
         if (irChannelCount > 1 && ir1) irs.push_back(getFloatArray(env, ir1));
@@ -638,15 +736,15 @@ Java_com_mokamusic_player_audio_dsp_NativeDspBridge_nativeCreate(
 
         auto* chain = new NativeChain(
             sampleRate, channels, blockSize,
-            std::move(ddc), std::move(eq), std::move(irs), convolverGainDb,
+            std::move(ddc), std::move(eq), std::move(iir), std::move(irs), convolverGainDb,
             normalizationEnabled == JNI_TRUE, normalizationStaticGainDb,
             normalizationAdaptiveFallback == JNI_TRUE, normalizationPreampDb,
             limiterEnabled == JNI_TRUE, limiterThresholdDb, limiterReleaseMs, postGainDb
         );
         __android_log_print(ANDROID_LOG_INFO, TAG,
-            "Native DSP created: %d Hz, %d ch, block=%d, ddc=%d, eq=%s, irChannels=%d",
+            "Native DSP created: %d Hz, %d ch, block=%d, ddc=%d, fir=%s, iir=%s, irChannels=%d",
             sampleRate, channels, blockSize, ddcCoefficients ? env->GetArrayLength(ddcCoefficients) / 5 : 0,
-            eqImpulse ? "yes" : "no", irChannelCount);
+            eqImpulse ? "yes" : "no", iirDefinition ? "yes" : "no", irChannelCount);
         return reinterpret_cast<jlong>(chain);
     } catch (const std::exception& e) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "nativeCreate failed: %s", e.what());

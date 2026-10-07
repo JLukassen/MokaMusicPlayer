@@ -10,6 +10,7 @@ import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 
 /**
  * Reads metadata from the audio file itself instead of trusting MediaStore's cached columns.
@@ -31,6 +32,7 @@ data class EmbeddedMetadata(
     val channelCount: Int? = null,
     /** ReplayGain/R128-derived static track gain, normalized to ReplayGain's ~-18 LUFS reference. */
     val normalizationGainDb: Float? = null,
+    val albumNormalizationGainDb: Float? = null,
     val artworkBytes: ByteArray? = null
 ) {
     fun mergedWith(fallback: EmbeddedMetadata): EmbeddedMetadata = EmbeddedMetadata(
@@ -46,6 +48,7 @@ data class EmbeddedMetadata(
         bitDepth = bitDepth ?: fallback.bitDepth,
         channelCount = channelCount ?: fallback.channelCount,
         normalizationGainDb = normalizationGainDb ?: fallback.normalizationGainDb,
+        albumNormalizationGainDb = albumNormalizationGainDb ?: fallback.albumNormalizationGainDb,
         artworkBytes = artworkBytes ?: fallback.artworkBytes
     )
 }
@@ -146,7 +149,9 @@ class EmbeddedMetadataReader(private val context: Context) {
             year = first("DATE", "YEAR"),
             genre = first("GENRE"),
             normalizationGainDb = parseReplayGainDb(first("REPLAYGAIN_TRACK_GAIN"))
-                ?: parseR128GainToReplayGainDb(first("R128_TRACK_GAIN"))
+                ?: parseR128GainToReplayGainDb(first("R128_TRACK_GAIN")),
+            albumNormalizationGainDb = parseReplayGainDb(first("REPLAYGAIN_ALBUM_GAIN"))
+                ?: parseR128GainToReplayGainDb(first("R128_ALBUM_GAIN"))
         )
     }
 
@@ -221,7 +226,7 @@ class EmbeddedMetadataReader(private val context: Context) {
             val len = b.int
             if (len < 0 || len > b.remaining()) break
             val valueBytes = ByteArray(len).also { b.get(it) }
-            val value = valueBytes.toString(Charsets.UTF_8).trim('\u0000', ' ', '\r', '\n')
+            val value = decodeRiffInfoText(valueBytes)
             if (value.isNotBlank()) values[id] = value
             if ((len and 1) == 1 && b.hasRemaining()) b.get()
         }
@@ -270,13 +275,19 @@ class EmbeddedMetadataReader(private val context: Context) {
                     val userText = decodeId3UserText(payload)
                     val key = userText?.first?.trim()?.uppercase()
                     val value = userText?.second
-                    val gain = when (key) {
-                        "REPLAYGAIN_TRACK_GAIN" -> parseReplayGainDb(value)
-                        "R128_TRACK_GAIN" -> parseR128GainToReplayGainDb(value)
-                        else -> null
-                    }
-                    if (gain != null && result.normalizationGainDb == null) {
-                        result = result.copy(normalizationGainDb = gain)
+                    when (key) {
+                        "REPLAYGAIN_TRACK_GAIN" -> parseReplayGainDb(value)?.let { gain ->
+                            if (result.normalizationGainDb == null) result = result.copy(normalizationGainDb = gain)
+                        }
+                        "R128_TRACK_GAIN" -> parseR128GainToReplayGainDb(value)?.let { gain ->
+                            if (result.normalizationGainDb == null) result = result.copy(normalizationGainDb = gain)
+                        }
+                        "REPLAYGAIN_ALBUM_GAIN" -> parseReplayGainDb(value)?.let { gain ->
+                            if (result.albumNormalizationGainDb == null) result = result.copy(albumNormalizationGainDb = gain)
+                        }
+                        "R128_ALBUM_GAIN" -> parseR128GainToReplayGainDb(value)?.let { gain ->
+                            if (result.albumNormalizationGainDb == null) result = result.copy(albumNormalizationGainDb = gain)
+                        }
                     }
                 }
                 "APIC" -> if (includeArtwork && result.artworkBytes == null) {
@@ -384,8 +395,71 @@ class EmbeddedMetadataReader(private val context: Context) {
     }
 }
 
-private fun String?.clean(): String? = this?.trim()?.takeUnless {
-    it.isBlank() || it.equals("<unknown>", true) || it.equals("unknown", true)
+private fun String?.clean(): String? = UnicodeText.display(this)?.takeUnless {
+    it.equals("<unknown>", true) || it.equals("unknown", true)
+}
+
+/**
+ * RIFF LIST/INFO does not define one universal character encoding and real music libraries contain
+ * UTF-8, UTF-16, CP949/EUC-KR, Shift-JIS and Windows-1252 tags. Decode conservatively without
+ * rewriting punctuation or transliterating the metadata.
+ */
+internal fun decodeRiffInfoText(bytes: ByteArray): String {
+    if (bytes.isEmpty()) return ""
+
+    fun cleaned(text: String): String = UnicodeText.display(text.trim('\u0000', ' ', '\r', '\n')) ?: ""
+
+    // Explicit BOMs are authoritative.
+    if (bytes.size >= 2) {
+        val b0 = bytes[0].toInt() and 0xff
+        val b1 = bytes[1].toInt() and 0xff
+        if (b0 == 0xff && b1 == 0xfe) return cleaned(bytes.toString(Charsets.UTF_16LE))
+        if (b0 == 0xfe && b1 == 0xff) return cleaned(bytes.toString(Charsets.UTF_16BE))
+    }
+
+    // Some RIFF writers emit UTF-16 without a BOM. Alternating NULs are a strong signal.
+    if (bytes.size >= 6) {
+        val oddZeros = (1 until bytes.size step 2).count { bytes[it].toInt() == 0 }
+        val evenZeros = (0 until bytes.size step 2).count { bytes[it].toInt() == 0 }
+        val half = bytes.size / 2
+        if (oddZeros >= half / 2) return cleaned(bytes.toString(Charsets.UTF_16LE))
+        if (evenZeros >= half / 2) return cleaned(bytes.toString(Charsets.UTF_16BE))
+    }
+
+    // Prefer strict UTF-8 when the byte sequence is actually valid UTF-8.
+    val utf8 = runCatching {
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+            .toString()
+    }.getOrNull()
+    if (utf8 != null) return cleaned(utf8)
+
+    data class Candidate(val text: String, val score: Int)
+    fun score(text: String): Int {
+        var points = 0
+        for (ch in text) {
+            when (ch.code) {
+                in 0xAC00..0xD7AF -> points += 8 // Hangul syllables
+                in 0x1100..0x11FF, in 0x3130..0x318F -> points += 6 // Hangul Jamo
+                in 0x3040..0x30FF -> points += 7 // Hiragana / Katakana
+                in 0x4E00..0x9FFF -> points += 4 // CJK
+                0xFFFD -> points -= 20
+                in 0x00..0x08, in 0x0B..0x1F -> points -= 5
+            }
+        }
+        return points
+    }
+
+    val candidates = listOf("x-windows-949", "EUC-KR", "Shift_JIS", "windows-1252")
+        .mapNotNull { name ->
+            runCatching { cleaned(bytes.toString(Charset.forName(name))) }.getOrNull()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { Candidate(it, score(it)) }
+        }
+
+    return candidates.maxByOrNull { it.score }?.text ?: cleaned(bytes.toString(Charsets.ISO_8859_1))
 }
 
 private fun parseReplayGainDb(value: String?): Float? {

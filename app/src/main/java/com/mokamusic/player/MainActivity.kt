@@ -13,6 +13,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -33,6 +35,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -46,6 +52,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.Player
 import com.mokamusic.player.data.ArtworkLoader
 import com.mokamusic.player.data.SavedQueueStore
+import com.mokamusic.player.data.UnicodeText
+import com.mokamusic.player.audio.UsbDspSafetyPolicy
 import com.mokamusic.player.audio.dsp.DspSettings
 import com.mokamusic.player.audio.dsp.DspDeviceProfileStore
 import com.mokamusic.player.audio.dsp.DspPresetId
@@ -54,6 +62,7 @@ import com.mokamusic.player.audio.dsp.RouteClass
 import com.mokamusic.player.audio.dsp.DspSettingsStore
 import com.mokamusic.player.audio.dsp.EqInterpolator
 import com.mokamusic.player.audio.dsp.EqMode
+import com.mokamusic.player.audio.dsp.NormalizationMode
 import com.mokamusic.player.model.MusicTrack
 import com.mokamusic.player.ui.theme.MokaTheme
 
@@ -147,7 +156,7 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                     NavigationBarItem(page == 1, { page = 1 }, { Icon(Icons.Default.LibraryMusic, null) }, label = { Text("Library") })
                     NavigationBarItem(page == 2, { page = 2 }, { Icon(Icons.Default.Search, null) }, label = { Text("Search") })
                     NavigationBarItem(page == 3, { page = 3 }, { Icon(Icons.Default.Tune, null) }, label = { Text("DSP") })
-                    NavigationBarItem(page == 4, { page = 4 }, { Icon(Icons.Default.MoreHoriz, null) }, label = { Text("More") })
+                    NavigationBarItem(page == 4, { page = 4 }, { Icon(Icons.Default.Settings, null) }, label = { Text("Settings") })
                 }
             }
         }
@@ -202,18 +211,22 @@ private fun OnboardingScreen(onContinue: () -> Unit) {
         Text("Moka Music Player", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Local lossless playback, source-rate USB audio, native DSP, ViPER-DDC and IRS convolution.",
-            style = MaterialTheme.typography.bodyLarge
+            "Local-first hi-fi playback with a transparent signal path and a native real-time DSP engine.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Spacer(Modifier.height(22.dp))
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("• Local FLAC/WAV library — files stay on your device")
-            Text("• Direct PCM and truthful bit-perfect reporting")
-            Text("• Native C++ DSP with automatic headroom")
-            Text("• Signal-path details and exportable diagnostics")
+        Spacer(Modifier.height(24.dp))
+        ElevatedCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                WelcomeFeature(Icons.Default.LibraryMusic, "Your library stays local", "Moka reads your music without rewriting the files.")
+                WelcomeFeature(Icons.Default.GraphicEq, "Tune without guessing", "EQ, ViPER-DDC and convolution remain visible in the signal path.")
+                WelcomeFeature(Icons.Default.Usb, "Know what reaches the output", "Source format, route and DSP state are reported instead of hidden behind a badge.")
+            }
         }
         Spacer(Modifier.height(28.dp))
-        Button(onClick = onContinue, modifier = Modifier.fillMaxWidth()) { Text("Continue") }
+        Button(onClick = onContinue, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(vertical = 14.dp)) {
+            Text("Open Moka")
+        }
     }
 }
 
@@ -262,7 +275,7 @@ private fun LibraryScreen(
     var trackMode by rememberSaveable { mutableIntStateOf(0) } // 0 all, 1 recent, 2 favorites
 
     val albumGroups = remember(tracks) { tracks.groupBy(::albumGroupKey) }
-    val artistGroups = remember(tracks) { tracks.groupBy { it.artist.trim().ifBlank { "Unknown artist" } } }
+    val artistGroups = remember(tracks) { tracks.groupBy { UnicodeText.key(it.artist.ifBlank { "Unknown artist" }) } }
     val genreGroups = remember(tracks) { tracks.groupBy { normalizedGenre(it) } }
 
     val selected = selectedCollection?.let(::decodeCollection)
@@ -358,13 +371,8 @@ private fun LibraryScreen(
                 }
             }
             1 -> CollectionList(
-                groups = albumGroups.entries.sortedWith(
-                    compareBy<Map.Entry<String, List<MusicTrack>>> { entry ->
-                        val first = entry.value.firstOrNull()
-                        (first?.albumArtist?.takeIf { it.isNotBlank() } ?: first?.artist ?: "Unknown artist").lowercase()
-                    }.thenBy { it.value.firstOrNull()?.album?.lowercase().orEmpty() }
-                ),
-                icon = Icons.Default.Album,
+                groups = albumGroups.entries.sortedWith(albumEntryComparator),
+                type = LibraryCollectionType.ALBUM,
                 title = { it.value.firstOrNull()?.album ?: "Unknown album" },
                 subtitle = { entry ->
                     val first = entry.value.firstOrNull()
@@ -377,17 +385,21 @@ private fun LibraryScreen(
                 }
             )
             2 -> CollectionList(
-                groups = artistGroups.entries.sortedBy { it.key.lowercase() },
-                icon = Icons.Default.Person,
-                title = { it.key },
-                subtitle = { "${it.value.size} track${if (it.value.size == 1) "" else "s"}" },
+                groups = artistGroups.entries.sortedWith(artistEntryComparator),
+                type = LibraryCollectionType.ARTIST,
+                title = { it.value.firstOrNull()?.artist ?: "Unknown artist" },
+                subtitle = { entry ->
+                    val albums = entry.value.map(::albumGroupKey).distinct().size
+                    "${albums} album${if (albums == 1) "" else "s"} · ${entry.value.size} track${if (entry.value.size == 1) "" else "s"}"
+                },
                 onClick = { entry ->
-                    selectedCollection = encodeCollection(LibraryCollectionType.ARTIST, entry.key, entry.key)
+                    val artist = entry.value.firstOrNull()?.artist ?: "Unknown artist"
+                    selectedCollection = encodeCollection(LibraryCollectionType.ARTIST, entry.key, artist)
                 }
             )
             3 -> CollectionList(
-                groups = genreGroups.entries.sortedBy { it.key.lowercase() },
-                icon = Icons.Default.Category,
+                groups = genreGroups.entries.sortedWith(genreEntryComparator),
+                type = LibraryCollectionType.GENRE,
                 title = { it.key },
                 subtitle = { "${it.value.size} track${if (it.value.size == 1) "" else "s"}" },
                 onClick = { entry ->
@@ -401,7 +413,7 @@ private fun LibraryScreen(
 @Composable
 private fun CollectionList(
     groups: List<Map.Entry<String, List<MusicTrack>>>,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    type: LibraryCollectionType,
     title: (Map.Entry<String, List<MusicTrack>>) -> String,
     subtitle: (Map.Entry<String, List<MusicTrack>>) -> String,
     onClick: (Map.Entry<String, List<MusicTrack>>) -> Unit
@@ -413,15 +425,93 @@ private fun CollectionList(
                 headlineContent = { Text(title(entry), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 supportingContent = { Text(subtitle(entry), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 leadingContent = {
-                    Surface(shape = RoundedCornerShape(16.dp), tonalElevation = 2.dp) {
-                        Box(Modifier.size(54.dp), contentAlignment = Alignment.Center) {
-                            Icon(icon, null)
-                        }
-                    }
+                    CollectionArtwork(entry.value, type, Modifier.size(58.dp))
                 },
                 trailingContent = { Icon(Icons.Default.ChevronRight, null) }
             )
             HorizontalDivider()
+        }
+    }
+}
+
+@Composable
+private fun CollectionArtwork(
+    tracks: List<MusicTrack>,
+    type: LibraryCollectionType,
+    modifier: Modifier = Modifier.size(58.dp)
+) {
+    val context = LocalContext.current
+    val loader = remember { ArtworkLoader(context.applicationContext) }
+    val representatives = remember(tracks, type) {
+        when (type) {
+            LibraryCollectionType.ALBUM -> tracks.firstOrNull()?.let(::listOf).orEmpty()
+            LibraryCollectionType.ARTIST -> tracks
+                .groupBy(::albumGroupKey)
+                .values
+                .mapNotNull { it.firstOrNull() }
+                .sortedWith(Comparator { a, b -> libraryTextComparator.compare(a.album, b.album) })
+                .take(4)
+            LibraryCollectionType.GENRE -> tracks
+                .groupBy(::albumGroupKey)
+                .values
+                .mapNotNull { it.firstOrNull() }
+                .take(4)
+        }
+    }
+    var artwork by remember(representatives.map { Triple(it.id, it.albumId, it.onlineArtworkUrl) }) {
+        mutableStateOf<List<android.graphics.Bitmap>>(emptyList())
+    }
+
+    LaunchedEffect(representatives.map { Triple(it.id, it.albumId, it.onlineArtworkUrl) }) {
+        artwork = representatives.mapNotNull { loader.load(it, 256) }
+    }
+
+    val fallbackIcon = when (type) {
+        LibraryCollectionType.ALBUM -> Icons.Default.Album
+        LibraryCollectionType.ARTIST -> Icons.Default.Person
+        LibraryCollectionType.GENRE -> Icons.Default.Category
+    }
+
+    Surface(modifier = modifier.clip(RoundedCornerShape(15.dp)), tonalElevation = 2.dp) {
+        Box(
+            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            when {
+                artwork.isEmpty() -> Icon(fallbackIcon, null)
+                artwork.size == 1 || type == LibraryCollectionType.ALBUM -> {
+                    Image(
+                        artwork.first().asImageBitmap(),
+                        null,
+                        Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+                else -> {
+                    Column(Modifier.fillMaxSize()) {
+                        repeat(2) { row ->
+                            Row(Modifier.weight(1f).fillMaxWidth()) {
+                                repeat(2) { col ->
+                                    val index = row * 2 + col
+                                    Box(
+                                        Modifier.weight(1f).fillMaxHeight().background(MaterialTheme.colorScheme.surfaceVariant),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        artwork.getOrNull(index)?.let { bitmap ->
+                                            Image(
+                                                bitmap.asImageBitmap(),
+                                                null,
+                                                Modifier.fillMaxSize(),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                        } ?: Icon(fallbackIcon, null, Modifier.size(18.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -445,6 +535,8 @@ private fun CollectionDetailScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            CollectionArtwork(tracks, collection.type, Modifier.size(72.dp))
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(collection.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
@@ -476,15 +568,22 @@ private fun CollectionDetailScreen(
 
         if (collection.type == LibraryCollectionType.ARTIST) {
             val albums = remember(tracks) {
-                tracks.groupBy(::albumGroupKey).entries.sortedBy { it.value.firstOrNull()?.album?.lowercase().orEmpty() }
+                tracks.groupBy(::albumGroupKey).entries.sortedWith(albumOnlyEntryComparator)
             }
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 12.dp)) {
                 albums.forEach { album ->
                     item(key = "header-${album.key}") {
-                        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp)) {
-                            Text(album.value.firstOrNull()?.album ?: "Unknown album", fontWeight = FontWeight.Bold)
-                            album.value.firstOrNull()?.year?.takeIf { it.isNotBlank() }?.let {
-                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CollectionArtwork(album.value, LibraryCollectionType.ALBUM, Modifier.size(52.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(album.value.firstOrNull()?.album ?: "Unknown album", fontWeight = FontWeight.Bold)
+                                album.value.firstOrNull()?.year?.takeIf { it.isNotBlank() }?.let {
+                                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                     }
@@ -534,10 +633,11 @@ private fun SearchScreen(
 ) {
     val filtered = remember(tracks, search) {
         if (search.isBlank()) tracks else tracks.filter {
-            it.title.contains(search, true) ||
-                it.artist.contains(search, true) ||
-                it.album.contains(search, true) ||
-                it.genre.orEmpty().contains(search, true)
+            UnicodeText.contains(it.title, search) ||
+                UnicodeText.contains(it.artist, search) ||
+                UnicodeText.contains(it.album, search) ||
+                UnicodeText.contains(it.albumArtist, search) ||
+                UnicodeText.contains(it.genre, search)
         }
     }
     Column(Modifier.fillMaxSize().padding(top = 12.dp)) {
@@ -598,10 +698,10 @@ private fun TrackRow(
 ) {
     val context = LocalContext.current
     val loader = remember { ArtworkLoader(context.applicationContext) }
-    var artwork by remember(track.albumId, track.id) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var artwork by remember(track.albumId, track.id, track.onlineArtworkUrl) { mutableStateOf<android.graphics.Bitmap?>(null) }
     var menuExpanded by remember(track.id) { mutableStateOf(false) }
 
-    LaunchedEffect(track.albumId, track.id) {
+    LaunchedEffect(track.albumId, track.id, track.onlineArtworkUrl) {
         artwork = loader.load(track, 180)
     }
 
@@ -660,11 +760,23 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
     val track = state.currentTrack
     if (track == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Default.Headphones, null, Modifier.size(72.dp))
-                Spacer(Modifier.height(16.dp))
-                Text("Moka Music Player", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
-                Text(if (state.controllerReady) "Choose a track from your library" else "Connecting to playback service…")
+            Column(
+                Modifier.padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.moka_brand_icon),
+                    contentDescription = null,
+                    modifier = Modifier.size(120.dp).clip(RoundedCornerShape(30.dp))
+                )
+                Spacer(Modifier.height(20.dp))
+                Text("Nothing playing", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    if (state.controllerReady) "Choose something from your library to start listening." else "Connecting to the Moka playback service…",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
         return
@@ -672,13 +784,13 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
 
     val context = LocalContext.current
     val loader = remember { ArtworkLoader(context.applicationContext) }
-    var artwork by remember(track.albumId, track.id) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var artwork by remember(track.albumId, track.id, track.onlineArtworkUrl) { mutableStateOf<android.graphics.Bitmap?>(null) }
     var showSignal by rememberSaveable { mutableStateOf(false) }
     var showQueue by rememberSaveable { mutableStateOf(false) }
     val dspSettings = remember(state.output.dspActive, state.dspMeters.updatedAtMs) {
         DspSettingsStore(context.applicationContext).load()
     }
-    LaunchedEffect(track.albumId, track.id) { artwork = loader.load(track, 1200) }
+    LaunchedEffect(track.albumId, track.id, track.onlineArtworkUrl) { artwork = loader.load(track, 1200) }
 
     if (showQueue) {
         QueueSheet(state = state, viewModel = viewModel, onDismiss = { showQueue = false })
@@ -697,37 +809,40 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text("MOKA", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                Text("Lossless player", style = MaterialTheme.typography.labelMedium)
-            }
-            AssistChip(
-                onClick = { showSignal = !showSignal },
-                label = { Text(outputChipLabel(state)) },
-                leadingIcon = {
-                    Icon(
-                        if (state.output.routeLabel.contains("USB", true)) Icons.Default.Usb else Icons.Default.Headphones,
-                        null,
-                        Modifier.size(18.dp)
-                    )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Image(
+                    painter = painterResource(R.drawable.moka_brand_icon),
+                    contentDescription = null,
+                    modifier = Modifier.size(42.dp).clip(RoundedCornerShape(12.dp))
+                )
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text("MOKA", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                    Text("Local hi-fi player", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            )
+            }
+            PlaybackStatusPill(state = state, onClick = { showSignal = !showSignal })
         }
 
         Spacer(Modifier.height(20.dp))
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(36.dp))
-                .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.tertiary))),
-            contentAlignment = Alignment.Center
+        Surface(
+            shape = RoundedCornerShape(30.dp),
+            shadowElevation = 12.dp,
+            tonalElevation = 2.dp,
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f)
         ) {
-            artwork?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-                ?: Icon(Icons.Default.GraphicEq, null, Modifier.size(110.dp))
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.surfaceVariant))),
+                contentAlignment = Alignment.Center
+            ) {
+                artwork?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+                    ?: Icon(Icons.Default.GraphicEq, null, Modifier.size(110.dp), tint = MaterialTheme.colorScheme.primary)
+            }
         }
 
-        Spacer(Modifier.height(22.dp))
+        Spacer(Modifier.height(24.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 track.title,
@@ -745,10 +860,35 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 )
             }
         }
-        Text(track.artist, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(track.album, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        track.genre?.takeIf { it.isNotBlank() }?.let {
-            Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        Text(
+            track.artist,
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            track.album,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AudioBadge(track.formatLabel.uppercase())
+            state.technical.bitDepth?.let {
+                Spacer(Modifier.width(8.dp))
+                AudioBadge("${it}-BIT")
+            }
+            state.technical.sampleRateHz?.let {
+                Spacer(Modifier.width(8.dp))
+                AudioBadge(formatSampleRate(it).uppercase())
+            }
         }
         Spacer(Modifier.height(14.dp))
 
@@ -823,8 +963,8 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
         Spacer(Modifier.height(10.dp))
         Surface(
             onClick = { showSignal = !showSignal },
-            shape = RoundedCornerShape(24.dp),
-            tonalElevation = 2.dp,
+            shape = RoundedCornerShape(28.dp),
+            tonalElevation = 3.dp,
             modifier = Modifier.fillMaxWidth().animateContentSize()
         ) {
             Column(Modifier.padding(18.dp)) {
@@ -834,17 +974,20 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
                     tech.bitDepth?.let { append(" · ${it}-bit") }
                     tech.sampleRateHz?.let { append(" · ${formatSampleRate(it)}") }
                 }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(detail, fontWeight = FontWeight.SemiBold)
+                        Text("Signal path", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(3.dp))
+                        Text(detail, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         Text(
                             "${state.output.routeLabel} · ${state.output.deviceName}",
                             style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    Icon(if (showSignal) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
+                    Icon(if (showSignal) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (showSignal) {
                     HorizontalDivider(Modifier.padding(vertical = 12.dp))
@@ -887,7 +1030,15 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
                         HorizontalDivider(Modifier.padding(vertical = 8.dp))
                         Text("DSP SIGNAL PATH", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                         SignalRow("Auto headroom", if (dspSettings.autoHeadroomEnabled) formatDb(state.dspMeters.automaticHeadroomDb) else "Off")
-                        SignalRow("Normalization", if (dspSettings.normalizationEnabled) "On" else "Off")
+                        SignalRow(
+                            "Normalization",
+                            if (dspSettings.normalizationEnabled) {
+                                val gain = if (dspSettings.normalizationMode == NormalizationMode.ALBUM) {
+                                    track.albumNormalizationGainDb ?: track.normalizationGainDb
+                                } else track.normalizationGainDb
+                                "${dspSettings.normalizationMode.label}${gain?.let { " · ${"%.1f".format(it)} dB" } ?: " · adaptive"}"
+                            } else "Off"
+                        )
                         SignalRow("ViPER-DDC", if (dspSettings.ddcEnabled) (dspSettings.ddcName ?: "On") else "Off")
                         SignalRow("Equalizer", if (dspSettings.eqEnabled) dspSettings.eqMode.label else "Off")
                         SignalRow("Convolver", if (dspSettings.convolverEnabled) (dspSettings.convolverName ?: "On") else "Off")
@@ -896,8 +1047,15 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
                         Text("LIVE DSP METERS", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                         SignalRow("Input peak", formatDbfs(state.dspMeters.inputPeakDbfs))
                         SignalRow("Output peak", formatDbfs(state.dspMeters.outputPeakDbfs))
+                        SignalRow("True-peak estimate", formatDbfs(state.dspMeters.intersamplePeakDbfs).replace("dBFS", "dBTP est."))
                         SignalRow("Full-scale samples", state.dspMeters.clippedSamples.toString())
                         state.dspMeters.throughputX?.let { SignalRow("DSP throughput", "${"%.2f".format(it)}× realtime") }
+                        SignalRow("Audio underruns", state.dspMeters.audioTrackUnderruns.toString())
+                        state.dspMeters.dspQueueDepth?.let { depth ->
+                            SignalRow("DSP queue", "$depth/${state.dspMeters.dspQueueCapacity ?: "?"}")
+                        }
+                        state.dspMeters.primedFrames?.let { SignalRow("Primed frames", it.toString()) }
+                        SignalRow("In-place reloads", state.dspMeters.hotReloadCount.toString())
                     }
                     SignalRow("Silence skipping", "Off")
                     SignalRow("Direct PCM", if (state.output.directEngineActive) "Active" else "Not active")
@@ -1030,6 +1188,164 @@ private fun MiniPlayer(
 }
 
 @Composable
+private fun WelcomeFeature(icon: ImageVector, title: String, body: String) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+        ) {
+            Icon(icon, null, Modifier.padding(10.dp).size(22.dp))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(body, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+    )
+}
+
+@Composable
+private fun AudioBadge(text: String) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+        )
+    }
+}
+
+@Composable
+private fun PlaybackStatusPill(state: MokaUiState, onClick: () -> Unit) {
+    val context = LocalContext.current
+    val pixelProtected = UsbDspSafetyPolicy.requiresDsp(context)
+    val label = when {
+        pixelProtected -> "USB · DSP PROTECTED"
+        state.output.dspActive -> "DSP ACTIVE"
+        state.output.sourceBitPerfectVerified -> "BIT PERFECT"
+        state.output.directEngineActive -> "DIRECT PCM"
+        else -> outputChipLabel(state)
+    }
+    val emphasized = pixelProtected || state.output.dspActive || state.output.sourceBitPerfectVerified
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(999.dp),
+        color = if (emphasized) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = if (emphasized) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (state.output.routeLabel.contains("USB", true)) Icons.Default.Usb else Icons.Default.Headphones,
+                null,
+                Modifier.size(16.dp)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun DspStatusBanner(settings: DspSettings, pixelUsbDspGuard: Boolean) {
+    val stageCount = listOf(
+        settings.eqEnabled,
+        settings.ddcEnabled,
+        settings.convolverEnabled,
+        settings.normalizationEnabled,
+        settings.limiterEnabled
+    ).count { it }
+    val title = when {
+        pixelUsbDspGuard -> "DSP protected on Pixel USB"
+        settings.masterEnabled -> "DSP active"
+        else -> "Pure/direct mode"
+    }
+    val detail = when {
+        pixelUsbDspGuard -> "Your saved tuning stays active on this route to prevent the unsafe Pixel USB level jump."
+        settings.masterEnabled -> "$stageCount active stage${if (stageCount == 1) "" else "s"} · 32-bit float processing"
+        else -> "Moka leaves the samples untouched when the output path supports it."
+    }
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = if (settings.masterEnabled || pixelUsbDspGuard) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = if (settings.masterEnabled || pixelUsbDspGuard) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)
+            ) {
+                Icon(Icons.Default.GraphicEq, null, Modifier.padding(10.dp).size(24.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.Bold)
+                Text(detail, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun EqualizerPreview(gains: List<Float>) {
+    val primary = MaterialTheme.colorScheme.primary
+    val grid = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
+    val center = MaterialTheme.colorScheme.outline.copy(alpha = 0.42f)
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+        modifier = Modifier.fillMaxWidth().height(132.dp)
+    ) {
+        Canvas(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 12.dp)) {
+            val maxDb = 15f
+            val midY = size.height / 2f
+            listOf(0f, size.height / 4f, midY, size.height * 3f / 4f, size.height).forEachIndexed { index, y ->
+                drawLine(
+                    color = if (index == 2) center else grid,
+                    start = androidx.compose.ui.geometry.Offset(0f, y.coerceIn(1f, size.height - 1f)),
+                    end = androidx.compose.ui.geometry.Offset(size.width, y.coerceIn(1f, size.height - 1f)),
+                    strokeWidth = if (index == 2) 1.5f else 1f
+                )
+            }
+            if (gains.size >= 2) {
+                val path = Path()
+                gains.forEachIndexed { i, gain ->
+                    val x = i.toFloat() / (gains.lastIndex.toFloat()) * size.width
+                    val y = midY - (gain.coerceIn(-maxDb, maxDb) / maxDb) * midY * 0.88f
+                    if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                drawPath(path = path, color = primary, style = Stroke(width = 4f, cap = StrokeCap.Round))
+                gains.forEachIndexed { i, gain ->
+                    val x = i.toFloat() / (gains.lastIndex.toFloat()) * size.width
+                    val y = midY - (gain.coerceIn(-maxDb, maxDb) / maxDb) * midY * 0.88f
+                    drawCircle(primary, radius = 4.5f, center = androidx.compose.ui.geometry.Offset(x, y))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SignalRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1046,6 +1362,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
     }
     val savedQueueStore = remember { SavedQueueStore(context.applicationContext) }
     var savedQueues by remember { mutableStateOf(savedQueueStore.list()) }
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
     val exportDiagnostics = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) {
             runCatching {
@@ -1058,56 +1375,27 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
 
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Image(
                     painter = painterResource(R.drawable.moka_brand_icon),
                     contentDescription = null,
-                    modifier = Modifier.size(84.dp).clip(RoundedCornerShape(22.dp))
+                    modifier = Modifier.size(76.dp).clip(RoundedCornerShape(22.dp))
                 )
                 Spacer(Modifier.width(16.dp))
-                Column {
-                    Text("Moka Music Player", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
-                    Text("v$versionName · early release", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Native hi-fi playback + DSP", style = MaterialTheme.typography.bodySmall)
+                Column(Modifier.weight(1f)) {
+                    Text("Moka 4.0 Beta 1", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                    Text("v$versionName · Local-first hi-fi", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                    Text("Music first. DSP when you want it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
-        item {
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(18.dp)) {
-                    Text("Diagnostics", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text(
-                        "Export the current route, source format, DSP settings, live meters, last error and crash information.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Button(onClick = { exportDiagnostics.launch("moka-diagnostics.txt") }) {
-                        Icon(Icons.Default.Description, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Export diagnostics")
-                    }
-                }
-            }
-        }
-        item {
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(18.dp)) {
-                    Text("Current audio route", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    SignalRow("Output", state.output.routeLabel)
-                    SignalRow("Device", state.output.deviceName)
-                    SignalRow("Route class", state.activeRouteProfile?.label ?: "Unknown")
-                    SignalRow("Engine", state.output.directEngineLabel ?: "Media3")
-                    SignalRow("DSP", if (state.output.dspActive) "Active" else "Off")
-                    state.dspMeters.throughputX?.let { SignalRow("DSP throughput", "${"%.2f".format(it)}×") }
-                }
-            }
-        }
+
         if (savedQueues.isNotEmpty()) {
+            item { SectionLabel("PLAYLISTS") }
             item {
                 ElevatedCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(18.dp)) {
@@ -1118,7 +1406,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
                                     Text(saved.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text("${saved.trackIds.size} tracks", style = MaterialTheme.typography.bodySmall)
+                                    Text("${saved.trackIds.size} tracks", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 IconButton(onClick = { viewModel.playSavedQueue(saved.trackIds) }) {
                                     Icon(Icons.Default.PlayArrow, "Play ${saved.name}")
@@ -1135,12 +1423,63 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 }
             }
         }
+
+        item { SectionLabel("LIBRARY & METADATA") }
+        item { MetadataEnrichmentCard(state, viewModel) }
+        item { LoudnessAnalysisCard(state, viewModel) }
+
+        item { SectionLabel("ADVANCED") }
         item {
             ElevatedCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(18.dp)) {
-                    Text("Project", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("Moka keeps local music read-only and does not upload your library for playback or DSP.")
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Advanced & diagnostics", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            Text(
+                                "Technical route details stay out of the way until you need them.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { showAdvanced = !showAdvanced }) {
+                            Icon(if (showAdvanced) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (showAdvanced) "Hide advanced" else "Show advanced")
+                        }
+                    }
+                    if (showAdvanced) {
+                        HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                        SignalRow("Output", state.output.routeLabel)
+                        SignalRow("Device", state.output.deviceName)
+                        SignalRow("Route class", state.activeRouteProfile?.label ?: "Unknown")
+                        SignalRow("Engine", state.output.directEngineLabel ?: "Media3")
+                        SignalRow("DSP", if (state.output.dspActive) "Active" else "Off")
+                        state.dspMeters.throughputX?.let { SignalRow("DSP throughput", "${"%.2f".format(it)}×") }
+                        SignalRow("Audio underruns", state.dspMeters.audioTrackUnderruns.toString())
+                        Spacer(Modifier.height(12.dp))
+                        OutlinedButton(onClick = { exportDiagnostics.launch("moka-diagnostics.txt") }) {
+                            Icon(Icons.Default.Description, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Export diagnostics")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(18.dp)) {
+                    Text("About Moka", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Local music remains read-only. Moka does not upload your library for playback or DSP.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Spacer(Modifier.height(10.dp))
+                    Text(
+                        "Beta 1 includes native FIR/IIR EQ, ViPER-DDC, convolution, automatic headroom, loudness normalization, device profiles and transparent signal-path reporting.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
                     OutlinedButton(onClick = {
                         runCatching {
                             context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/JLukassen/MokaMusicPlayer")))
@@ -1148,21 +1487,12 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                     }) {
                         Icon(Icons.Default.Code, null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Open GitHub")
+                        Text("Source on GitHub")
                     }
                 }
             }
         }
-        item {
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(18.dp)) {
-                    Text("Playback status", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("Gapless Media3 playback is preserved where the decoder/container exposes gapless metadata. True seamless handoff between Moka's direct PCM/DSP tracks is still experimental and is not falsely labeled gapless yet.")
-                    Spacer(Modifier.height(8.dp))
-                    Text("Queue reordering/removal, favorites, recently added, device DSP profiles, and signal-path diagnostics are enabled in this iteration.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
+
         item {
             TextButton(onClick = {
                 context.getSharedPreferences("moka_ui", Context.MODE_PRIVATE).edit().putBoolean("onboarding_seen", false).apply()
@@ -1171,7 +1501,99 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 Spacer(Modifier.width(8.dp))
                 Text("Show welcome screen next launch")
             }
-            Spacer(Modifier.height(80.dp))
+            Spacer(Modifier.height(72.dp))
+        }
+    }
+}
+
+@Composable
+private fun MetadataEnrichmentCard(state: MokaUiState, viewModel: MokaViewModel) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("Optional MusicBrainz enrichment", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "Moka stays local-first. This optional pass matches unique albums against MusicBrainz and caches Cover Art Archive artwork plus core release date/type/identifier data. Embedded tags always win.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (state.metadataEnrichmentRunning) {
+                val progress = if (state.metadataEnrichmentTotal > 0) {
+                    state.metadataEnrichmentCompleted.toFloat() / state.metadataEnrichmentTotal.toFloat()
+                } else 0f
+                LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                Text(
+                    "${state.metadataEnrichmentCompleted}/${state.metadataEnrichmentTotal} albums · ${state.metadataEnrichmentMatched} matched",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            state.metadataEnrichmentStatus?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    enabled = !state.metadataEnrichmentRunning,
+                    onClick = { viewModel.enrichOnlineMetadata(false) }
+                ) {
+                    Icon(Icons.Default.AutoAwesome, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Enrich library")
+                }
+                OutlinedButton(
+                    enabled = !state.metadataEnrichmentRunning,
+                    onClick = viewModel::clearOnlineMetadata
+                ) { Text("Clear cache") }
+            }
+            Text(
+                "Online enrichment is never required for playback and is not run automatically. MusicBrainz requests are rate-limited and cached.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun LoudnessAnalysisCard(state: MokaUiState, viewModel: MokaViewModel) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("Offline loudness analysis", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "Analyze decoded local PCM for BS.1770-style K-weighted loudness when files do not provide ReplayGain/R128 tags. Results are cached; your audio files are never modified.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (state.loudnessAnalysisRunning) {
+                val progress = if (state.loudnessAnalysisTotal > 0) {
+                    state.loudnessAnalysisCompleted.toFloat() / state.loudnessAnalysisTotal.toFloat()
+                } else 0f
+                LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                Text(
+                    "${state.loudnessAnalysisCompleted}/${state.loudnessAnalysisTotal} tracks · ${state.loudnessAnalysisFailed} failures",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            state.loudnessAnalysisStatus?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    enabled = !state.loudnessAnalysisRunning,
+                    onClick = viewModel::analyzeLoudnessForNormalization
+                ) {
+                    Icon(Icons.Default.GraphicEq, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Analyze library")
+                }
+                OutlinedButton(
+                    enabled = !state.loudnessAnalysisRunning,
+                    onClick = viewModel::clearLoudnessAnalysis
+                ) { Text("Clear analysis") }
+            }
+            Text(
+                "The scanner pauses playback to avoid competing with the real-time decoder. Track and album gains target -18 LUFS; inter-sample peak is diagnostic and explicitly reported as an estimate.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -1183,10 +1605,13 @@ private fun DspScreen() {
     val profileStore = remember { DspDeviceProfileStore(context.applicationContext) }
     var settings by remember { mutableStateOf(store.load()) }
     var autoProfilesEnabled by remember { mutableStateOf(profileStore.enabled) }
+    val pixelUsbDspGuard = UsbDspSafetyPolicy.requiresDsp(context)
 
     fun save(next: DspSettings) {
-        settings = next
         store.save(next)
+        // Reload effective settings so the Pixel USB safety guard is reflected immediately
+        // without permanently overwriting the user's stored master preference.
+        settings = store.load()
     }
 
     fun displayName(uri: android.net.Uri): String {
@@ -1217,7 +1642,9 @@ private fun DspScreen() {
     ) {
         item {
             Text("Moka DSP", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-            Text("JamesDSP-compatible tuning inside Moka's local playback path", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Shape the sound. Moka keeps every active stage visible.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+            DspStatusBanner(settings = settings, pixelUsbDspGuard = pixelUsbDspGuard)
         }
         item {
             ElevatedCard(Modifier.fillMaxWidth()) {
@@ -1236,7 +1663,8 @@ private fun DspScreen() {
                         ) { Text("Safe") }
                         OutlinedButton(
                             onClick = { save(DspPresets.apply(DspPresetId.OFF, settings)) },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            enabled = !pixelUsbDspGuard
                         ) { Text("Pure") }
                     }
                 }
@@ -1247,9 +1675,20 @@ private fun DspScreen() {
                 Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("DSP engine", fontWeight = FontWeight.Bold)
-                        Text(if (settings.masterEnabled) "High-resolution 32-bit float processing" else "Pure/direct path when possible", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            when {
+                                pixelUsbDspGuard -> "Required for safe Pixel 8a USB playback · your saved DSP profile stays active"
+                                settings.masterEnabled -> "High-resolution 32-bit float processing"
+                                else -> "Pure/direct path when possible"
+                            },
+                            style = MaterialTheme.typography.bodySmall
+                        )
                     }
-                    Switch(checked = settings.masterEnabled, onCheckedChange = { save(settings.copy(masterEnabled = it)) })
+                    Switch(
+                        checked = settings.masterEnabled,
+                        enabled = !pixelUsbDspGuard,
+                        onCheckedChange = { save(settings.copy(masterEnabled = it)) }
+                    )
                 }
             }
         }
@@ -1293,6 +1732,24 @@ private fun DspScreen() {
                         )
                     }
                     if (settings.normalizationEnabled) {
+                        Text("Normalization mode", fontWeight = FontWeight.SemiBold)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            NormalizationMode.entries.forEach { mode ->
+                                FilterChip(
+                                    selected = settings.normalizationMode == mode,
+                                    onClick = { save(settings.copy(normalizationMode = mode)) },
+                                    label = { Text(mode.label) }
+                                )
+                            }
+                        }
+                        Text(
+                            if (settings.normalizationMode == NormalizationMode.ALBUM)
+                                "Preserves loudness relationships within an album when album ReplayGain/R128 tags exist."
+                            else "Normalizes each track independently when track ReplayGain/R128 tags exist.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text("Adaptive fallback")
@@ -1318,58 +1775,91 @@ private fun DspScreen() {
             }
         }
         item {
-            ElevatedCard(Modifier.fillMaxWidth()) {
+            ElevatedCard(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = if (settings.eqEnabled) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f)
+                    else MaterialTheme.colorScheme.surface
+                )
+            ) {
                 Column(Modifier.padding(18.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Multimodal equalizer", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                            Text(settings.eqMode.label, style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                if (settings.eqEnabled) settings.eqMode.label else "Off",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                         Switch(settings.eqEnabled, { save(settings.copy(eqEnabled = it)) })
                     }
-                    Spacer(Modifier.height(8.dp))
-                    var modeMenu by remember { mutableStateOf(false) }
-                    Box {
-                        FilledTonalButton(onClick = { modeMenu = true }) { Text(settings.eqMode.label) }
-                        DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
-                            EqMode.entries.forEach { mode -> DropdownMenuItem(text = { Text(mode.label) }, onClick = { save(settings.copy(eqMode = mode)); modeMenu = false }) }
+                    Spacer(Modifier.height(12.dp))
+                    EqualizerPreview(settings.eqGainsDb)
+                    Spacer(Modifier.height(14.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        var modeMenu by remember { mutableStateOf(false) }
+                        Box(Modifier.weight(1f)) {
+                            FilledTonalButton(onClick = { modeMenu = true }, modifier = Modifier.fillMaxWidth()) { Text(settings.eqMode.label) }
+                            DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
+                                EqMode.entries.forEach { mode ->
+                                    DropdownMenuItem(
+                                        text = { Text(mode.label) },
+                                        onClick = { save(settings.copy(eqMode = mode)); modeMenu = false }
+                                    )
+                                }
+                            }
                         }
-                    }
-                    if (settings.eqMode == EqMode.FIR_MINIMUM_PHASE) {
-                        Spacer(Modifier.height(8.dp))
-                        var interpMenu by remember { mutableStateOf(false) }
-                        Box {
-                            OutlinedButton(onClick = { interpMenu = true }) { Text(settings.eqInterpolator.label) }
-                            DropdownMenu(expanded = interpMenu, onDismissRequest = { interpMenu = false }) {
-                                EqInterpolator.entries.forEach { mode -> DropdownMenuItem(text = { Text(mode.label) }, onClick = { save(settings.copy(eqInterpolator = mode)); interpMenu = false }) }
+                        if (settings.eqMode == EqMode.FIR_MINIMUM_PHASE) {
+                            var interpMenu by remember { mutableStateOf(false) }
+                            Box(Modifier.weight(1f)) {
+                                OutlinedButton(onClick = { interpMenu = true }, modifier = Modifier.fillMaxWidth()) { Text(settings.eqInterpolator.label) }
+                                DropdownMenu(expanded = interpMenu, onDismissRequest = { interpMenu = false }) {
+                                    EqInterpolator.entries.forEach { mode ->
+                                        DropdownMenuItem(
+                                            text = { Text(mode.label) },
+                                            onClick = { save(settings.copy(eqInterpolator = mode)); interpMenu = false }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                     Spacer(Modifier.height(12.dp))
-                    Text("Your JamesDSP curve", fontWeight = FontWeight.SemiBold)
-                    Text("25 · 40 · 63 · 100 · 160 · 250 · 400 · 630 · 1k · 1.6k · 2.5k · 4k · 6.3k · 10k · 16k", style = MaterialTheme.typography.labelSmall)
+                    HorizontalDivider()
+                    Spacer(Modifier.height(8.dp))
+                    DspSettings.EQ_FREQUENCIES_HZ.indices.forEach { i ->
+                        val freq = DspSettings.EQ_FREQUENCIES_HZ[i]
+                        val gain = settings.eqGainsDb[i]
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (freq >= 1000) "${freq / 1000f}k" else "$freq",
+                                Modifier.width(52.dp),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Slider(
+                                value = gain,
+                                onValueChange = { v ->
+                                    val g = settings.eqGainsDb.toMutableList()
+                                    g[i] = (v * 10f).toInt() / 10f
+                                    save(settings.copy(eqGainsDb = g))
+                                },
+                                valueRange = -15f..15f,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text("${"%.1f".format(gain)}", Modifier.width(48.dp))
+                        }
+                    }
                 }
             }
         }
-        items(DspSettings.EQ_FREQUENCIES_HZ.indices.toList(), key = { it }) { i ->
-            val freq = DspSettings.EQ_FREQUENCIES_HZ[i]
-            val gain = settings.eqGainsDb[i]
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(if (freq >= 1000) "${freq / 1000f}k" else "$freq", Modifier.width(52.dp), fontWeight = FontWeight.SemiBold)
-                Slider(
-                    value = gain,
-                    onValueChange = { v ->
-                        val g = settings.eqGainsDb.toMutableList(); g[i] = (v * 10f).toInt() / 10f
-                        save(settings.copy(eqGainsDb = g))
-                    },
-                    valueRange = -15f..15f,
-                    modifier = Modifier.weight(1f)
-                )
-                Text("${"%.1f".format(gain)}", Modifier.width(48.dp))
-            }
-        }
         item {
-            ElevatedCard(Modifier.fillMaxWidth()) {
+            ElevatedCard(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = if (settings.ddcEnabled) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surface
+                )
+            ) {
                 Column(Modifier.padding(18.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -1386,7 +1876,12 @@ private fun DspScreen() {
             }
         }
         item {
-            ElevatedCard(Modifier.fillMaxWidth()) {
+            ElevatedCard(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = if (settings.convolverEnabled) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.24f) else MaterialTheme.colorScheme.surface
+                )
+            ) {
                 Column(Modifier.padding(18.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -1446,9 +1941,9 @@ private fun DspScreen() {
                 eqMode = EqMode.FIR_MINIMUM_PHASE,
                 eqInterpolator = EqInterpolator.MAKIMA,
                 eqGainsDb = DspSettings.FAVORITE_EQ_GAINS
-            )) }, label = { Text("Restore screenshot tuning") }, leadingIcon = { Icon(Icons.Default.Restore, null) })
+            )) }, label = { Text("Restore Moka reference") }, leadingIcon = { Icon(Icons.Default.Restore, null) })
             Spacer(Modifier.height(6.dp))
-            Text("DSP changes hot-reload during playback after a short debounce. When DSP is active, Now Playing should show MOKA · HI-RES DSP. Source bit-perfect is intentionally false because the samples are being tuned.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Changes apply live during playback. Now Playing shows the active route and DSP state; source bit-perfect is intentionally false whenever Moka is tuning the samples.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(80.dp))
         }
     }
@@ -1482,15 +1977,44 @@ private fun DeviceProfileRow(route: RouteClass, store: DspDeviceProfileStore) {
 }
 
 private fun albumGroupKey(track: MusicTrack): String =
-    if (track.albumId > 0L) "id:${track.albumId}" else "name:${track.album.lowercase()}|${track.albumArtist.orEmpty().lowercase()}"
+    if (track.albumId > 0L) "id:${track.albumId}" else
+        "name:${UnicodeText.key(track.album)}|${UnicodeText.key(track.albumArtist ?: track.artist)}"
 
 private fun normalizedGenre(track: MusicTrack): String =
-    track.genre?.trim()?.takeIf { it.isNotBlank() } ?: "Unknown genre"
+    UnicodeText.display(track.genre)?.takeIf { it.isNotBlank() } ?: "Unknown genre"
 
-private val collectionTrackComparator = compareBy<MusicTrack> { it.discNumber ?: 0 }
-    .thenBy { it.trackNumber ?: Int.MAX_VALUE }
-    .thenBy { it.album.lowercase() }
-    .thenBy { it.title.lowercase() }
+private val libraryTextComparator = UnicodeText.comparator()
+
+private val collectionTrackComparator = Comparator<MusicTrack> { a, b ->
+    compareValues(a.discNumber ?: 0, b.discNumber ?: 0).takeIf { it != 0 }
+        ?: compareValues(a.trackNumber ?: Int.MAX_VALUE, b.trackNumber ?: Int.MAX_VALUE).takeIf { it != 0 }
+        ?: libraryTextComparator.compare(a.album, b.album).takeIf { it != 0 }
+        ?: libraryTextComparator.compare(a.title, b.title)
+}
+
+private val albumEntryComparator = Comparator<Map.Entry<String, List<MusicTrack>>> { a, b ->
+    val af = a.value.firstOrNull()
+    val bf = b.value.firstOrNull()
+    val aa = af?.albumArtist?.takeIf { it.isNotBlank() } ?: af?.artist ?: "Unknown artist"
+    val ba = bf?.albumArtist?.takeIf { it.isNotBlank() } ?: bf?.artist ?: "Unknown artist"
+    libraryTextComparator.compare(aa, ba).takeIf { it != 0 }
+        ?: libraryTextComparator.compare(af?.album.orEmpty(), bf?.album.orEmpty())
+}
+
+private val albumOnlyEntryComparator = Comparator<Map.Entry<String, List<MusicTrack>>> { a, b ->
+    libraryTextComparator.compare(a.value.firstOrNull()?.album.orEmpty(), b.value.firstOrNull()?.album.orEmpty())
+}
+
+private val artistEntryComparator = Comparator<Map.Entry<String, List<MusicTrack>>> { a, b ->
+    libraryTextComparator.compare(
+        a.value.firstOrNull()?.artist ?: "Unknown artist",
+        b.value.firstOrNull()?.artist ?: "Unknown artist"
+    )
+}
+
+private val genreEntryComparator = Comparator<Map.Entry<String, List<MusicTrack>>> { a, b ->
+    libraryTextComparator.compare(a.key, b.key)
+}
 
 private fun encodeCollection(type: LibraryCollectionType, key: String, title: String): String =
     "${type.name}\u001F${key}\u001F${title}"

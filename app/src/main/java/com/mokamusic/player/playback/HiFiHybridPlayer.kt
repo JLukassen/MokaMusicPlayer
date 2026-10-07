@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingSimpleBasePlayer
@@ -38,8 +39,8 @@ class HiFiHybridPlayer(
     private val dspStore = DspSettingsStore(appContext)
     private val dspReloadRunnable = Runnable { reloadCurrentItemForDspSettings() }
     private val dspPreferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
-        // EQ sliders can save dozens of values while dragging. Debounce restarts so DSP hot reload
-        // is stable and audible without thrashing AudioTrack/MediaCodec.
+        // EQ sliders can save dozens of values while dragging. Debounce rebuild requests so the
+        // background DSP builder can coalesce edits without thrashing the live audio path.
         mainHandler.removeCallbacks(dspReloadRunnable)
         mainHandler.postDelayed(dspReloadRunnable, 350L)
     }
@@ -298,6 +299,32 @@ class HiFiHybridPlayer(
 
     private fun reloadCurrentItemForDspSettings() {
         val item = fallback.currentMediaItem ?: return
+        val settings = dspStore.load()
+        val dspRequested = settings.anyProcessingEnabled
+
+        // Once direct playback is already on Moka's float output path, DSP parameters can be
+        // rebuilt between PCM blocks. Do not tear down MediaCodec, AudioTrack or audio focus for
+        // EQ/DDC/convolver/limiter changes. Turning DSP off becomes float bypass for the remainder
+        // of the current track; turning it back on reuses that same output stream.
+        if (directActive && direct.isFloatDspPath && direct.requestDspHotReload()) {
+            Log.i(TAG, "DSP preference change scheduled as in-place hot reload")
+            invalidateState()
+            return
+        }
+
+        // A pure integer direct stream only needs rebuilding when DSP transitions from off -> on,
+        // because that is the one case where the AudioTrack encoding must change to float. Saving
+        // EQ values while the DSP master is off should be silent and should not restart playback.
+        if (directActive && !direct.isFloatDspPath && !dspRequested) {
+            return
+        }
+
+        // If Media3 is rendering and DSP is still off, there is no DSP route to reload. This also
+        // avoids repeatedly retrying a direct path that previously fell back for codec/route reasons.
+        if (!directActive && !dspRequested) {
+            return
+        }
+
         val position = if (directActive) direct.currentPositionMs else fallback.currentPosition.coerceAtLeast(0L)
         val shouldPlay = desiredPlayWhenReady || fallback.playWhenReady
         val shouldUseDirect = direct.canAttempt(item)
@@ -362,5 +389,9 @@ class HiFiHybridPlayer(
             AudioPathMonitor.endDirectPath()
             AudioPathMonitor.clearOutput()
         }
+    }
+
+    private companion object {
+        const val TAG = "MokaHybrid"
     }
 }

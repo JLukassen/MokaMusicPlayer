@@ -29,7 +29,8 @@ import androidx.media3.exoplayer.audio.ForwardingAudioOutputProvider
 class MokaAudioOutputProvider(context: Context) : ForwardingAudioOutputProvider(
     AudioTrackAudioOutputProvider.Builder(context.applicationContext).build()
 ) {
-    private val audioManager = context.applicationContext.getSystemService(AudioManager::class.java)
+    private val appContext = context.applicationContext
+    private val audioManager = appContext.getSystemService(AudioManager::class.java)
     private val mediaAttributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_MEDIA)
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
@@ -98,6 +99,12 @@ class MokaAudioOutputProvider(context: Context) : ForwardingAudioOutputProvider(
 
         if (usbDevice == null) {
             clearPreferredUsbMixer()
+            return null
+        }
+
+        if (UsbDspSafetyPolicy.shouldAvoidBitPerfect(appContext, usbDevice)) {
+            runCatching { audioManager.clearPreferredMixerAttributes(mediaAttributes, usbDevice) }
+            activeUsbDevice = null
             return null
         }
 

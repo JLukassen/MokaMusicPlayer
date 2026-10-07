@@ -15,9 +15,15 @@ data class DspMeterSnapshot(
     val engine: String = "Off",
     val inputPeakDbfs: Float = -120f,
     val outputPeakDbfs: Float = -120f,
+    val intersamplePeakDbfs: Float = -120f,
     val clippedSamples: Long = 0L,
     val automaticHeadroomDb: Float = 0f,
     val throughputX: Float? = null,
+    val audioTrackUnderruns: Int = 0,
+    val dspQueueDepth: Int? = null,
+    val dspQueueCapacity: Int? = null,
+    val primedFrames: Int? = null,
+    val hotReloadCount: Int = 0,
     val updatedAtMs: Long = 0L
 )
 
@@ -26,26 +32,29 @@ object DspRuntimeMonitor {
 
     fun snapshot(): DspMeterSnapshot = snapshot
 
+    @Synchronized
     fun updateBlock(
         engine: String,
         inputPeak: Float,
         outputPeak: Float,
+        intersamplePeak: Float,
         clippedSamples: Long,
         headroomDb: Float
     ) {
         val old = snapshot
-        snapshot = DspMeterSnapshot(
+        snapshot = old.copy(
             active = true,
             engine = engine,
             inputPeakDbfs = linearToDb(inputPeak),
             outputPeakDbfs = linearToDb(outputPeak),
+            intersamplePeakDbfs = linearToDb(intersamplePeak),
             clippedSamples = old.clippedSamples + clippedSamples,
             automaticHeadroomDb = headroomDb,
-            throughputX = old.throughputX,
             updatedAtMs = System.currentTimeMillis()
         )
     }
 
+    @Synchronized
     fun updateThroughput(engine: String, realtime: Float, headroomDb: Float) {
         val old = snapshot
         snapshot = old.copy(
@@ -57,6 +66,46 @@ object DspRuntimeMonitor {
         )
     }
 
+    @Synchronized
+    fun updateAudioPipeline(
+        underruns: Int,
+        queueDepth: Int?,
+        queueCapacity: Int?,
+        primedFrames: Int?
+    ) {
+        val old = snapshot
+        snapshot = old.copy(
+            audioTrackUnderruns = underruns.coerceAtLeast(0),
+            dspQueueDepth = queueDepth,
+            dspQueueCapacity = queueCapacity,
+            primedFrames = primedFrames,
+            updatedAtMs = System.currentTimeMillis()
+        )
+    }
+
+    @Synchronized
+    fun noteHotReload() {
+        val old = snapshot
+        snapshot = old.copy(
+            hotReloadCount = old.hotReloadCount + 1,
+            updatedAtMs = System.currentTimeMillis()
+        )
+    }
+
+    @Synchronized
+    fun resetSignal() {
+        val old = snapshot
+        snapshot = DspMeterSnapshot(
+            audioTrackUnderruns = old.audioTrackUnderruns,
+            dspQueueDepth = old.dspQueueDepth,
+            dspQueueCapacity = old.dspQueueCapacity,
+            primedFrames = old.primedFrames,
+            hotReloadCount = old.hotReloadCount,
+            updatedAtMs = System.currentTimeMillis()
+        )
+    }
+
+    @Synchronized
     fun clear() {
         snapshot = DspMeterSnapshot()
     }

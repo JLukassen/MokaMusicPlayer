@@ -27,7 +27,12 @@ data class MusicTrack(
      * Static per-track gain in dB for ReplayGain-style normalization.
      * Null means no trusted file-provided loudness gain was found.
      */
-    val normalizationGainDb: Float? = null
+    val normalizationGainDb: Float? = null,
+    /** Album-level ReplayGain/R128 gain. Used when normalization mode is Album. */
+    val albumNormalizationGainDb: Float? = null,
+    /** Optional online enrichment. Local embedded metadata always remains authoritative. */
+    val musicBrainzReleaseGroupId: String? = null,
+    val onlineArtworkUrl: String? = null
 ) {
     val formatLabel: String
         get() = when {

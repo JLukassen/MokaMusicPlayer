@@ -5,12 +5,16 @@ import android.content.Context
 import android.os.Build
 import android.provider.MediaStore
 import com.mokamusic.player.model.MusicTrack
+import com.mokamusic.player.audio.LoudnessAnalysisStore
+import com.mokamusic.player.metadata.OnlineMetadataStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 class MusicLibraryRepository(private val context: Context) {
     private val embeddedReader = EmbeddedMetadataReader(context)
     private val cache = MusicLibraryCache(context)
+    private val onlineMetadata = OnlineMetadataStore(context)
+    private val loudnessStore = LoudnessAnalysisStore(context)
     private val statePrefs = context.applicationContext.getSharedPreferences("moka_library_state", Context.MODE_PRIVATE)
 
     suspend fun loadCached(): List<MusicTrack> = cache.load()
@@ -66,18 +70,44 @@ class MusicLibraryRepository(private val context: Context) {
                 val direct = embeddedReader.read(uri, displayName, includeArtwork = false)
                 val inferred = inferFromPath(displayName, relativePath)
 
-                val title = direct.title.usable()
-                    ?: mediaTitle
-                    ?: inferred.title
-                    ?: displayName.substringBeforeLast('.').ifBlank { "Unknown track" }
-                val artist = direct.artist.usable()
-                    ?: mediaArtist
-                    ?: inferred.artist
-                    ?: "Unknown artist"
-                val album = direct.album.usable()
-                    ?: mediaAlbum
-                    ?: inferred.album
-                    ?: "Unknown album"
+                val title = UnicodeText.display(
+                    direct.title.usable()
+                        ?: mediaTitle
+                        ?: inferred.title
+                        ?: displayName.substringBeforeLast('.').ifBlank { "Unknown track" }
+                ) ?: "Unknown track"
+                val artist = UnicodeText.display(
+                    direct.artist.usable()
+                        ?: mediaArtist
+                        ?: inferred.artist
+                        ?: "Unknown artist"
+                ) ?: "Unknown artist"
+                val album = UnicodeText.display(
+                    direct.album.usable()
+                        ?: mediaAlbum
+                        ?: inferred.album
+                        ?: "Unknown album"
+                ) ?: "Unknown album"
+
+                val enrichment = onlineMetadata.get(
+                    direct.albumArtist.usable() ?: artist,
+                    album
+                )
+                val analysisProbe = MusicTrack(
+                    id = id,
+                    uri = uri,
+                    displayName = displayName,
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    albumId = cursor.getLong(albumIdColumn),
+                    durationMs = cursor.getLong(durationColumn),
+                    mimeType = cursor.getString(mimeColumn),
+                    sizeBytes = cursor.getLong(sizeColumn),
+                    relativePath = relativePath,
+                    dateAddedEpochSeconds = cursor.getLong(dateAddedColumn)
+                )
+                val loudness = loudnessStore.get(analysisProbe)
 
                 tracks += MusicTrack(
                     id = id,
@@ -95,26 +125,39 @@ class MusicLibraryRepository(private val context: Context) {
                     albumArtist = direct.albumArtist.usable(),
                     trackNumber = direct.trackNumber ?: inferred.trackNumber,
                     discNumber = direct.discNumber,
-                    year = direct.year.usable(),
-                    genre = direct.genre.usable(),
+                    year = direct.year.usable() ?: enrichment?.releaseDate?.substringBefore('-')?.takeIf { it.isNotBlank() },
+                    genre = direct.genre.usable() ?: enrichment?.genres?.firstOrNull(),
                     sampleRateHz = direct.sampleRateHz,
                     bitDepth = direct.bitDepth,
                     channelCount = direct.channelCount,
-                    normalizationGainDb = direct.normalizationGainDb
+                    normalizationGainDb = direct.normalizationGainDb ?: loudness?.trackGainDb,
+                    albumNormalizationGainDb = direct.albumNormalizationGainDb ?: loudness?.albumGainDb,
+                    musicBrainzReleaseGroupId = enrichment?.releaseGroupId,
+                    onlineArtworkUrl = enrichment?.coverArtUrl
                 )
             }
         }
 
-        val sorted = tracks.sortedWith(
-            compareBy<MusicTrack> { (it.albumArtist?.takeIf(String::isNotBlank) ?: it.artist).lowercase() }
-                .thenBy { it.album.lowercase() }
-                .thenBy { it.discNumber ?: 0 }
-                .thenBy { it.trackNumber ?: Int.MAX_VALUE }
-                .thenBy { it.title.lowercase() }
-        )
-        runCatching { cache.save(sorted) }
-        runCatching { MediaStore.getVersion(context) }.getOrNull()?.let { version ->
-            statePrefs.edit().putString("media_store_version", version).apply()
+        val textComparator = UnicodeText.comparator()
+        val sorted = tracks.sortedWith(Comparator { a, b ->
+            val aArtist = a.albumArtist?.takeIf(String::isNotBlank) ?: a.artist
+            val bArtist = b.albumArtist?.takeIf(String::isNotBlank) ?: b.artist
+            textComparator.compare(aArtist, bArtist)
+                .takeIf { it != 0 }
+                ?: textComparator.compare(a.album, b.album).takeIf { it != 0 }
+                ?: compareValues(a.discNumber ?: 0, b.discNumber ?: 0).takeIf { it != 0 }
+                ?: compareValues(a.trackNumber ?: Int.MAX_VALUE, b.trackNumber ?: Int.MAX_VALUE).takeIf { it != 0 }
+                ?: textComparator.compare(a.title, b.title)
+        })
+        val cacheSaved = runCatching { cache.save(sorted) }.isSuccess
+        if (cacheSaved) {
+            runCatching { MediaStore.getVersion(context) }.getOrNull()?.let { version ->
+                statePrefs.edit().putString("media_store_version", version).apply()
+            }
+        } else {
+            // Never advertise a cache generation as current when its AtomicFile commit failed.
+            // Keeping this marker stale guarantees the next launch offers/retries reconciliation.
+            statePrefs.edit().remove("media_store_version").apply()
         }
         sorted
     }
@@ -150,8 +193,8 @@ private fun inferFromPath(displayName: String, relativePath: String?): PathMetad
     }
 }
 
-private fun String?.usable(): String? = this?.trim()?.takeUnless {
-    it.isBlank() || it.equals("<unknown>", true) || it.equals("unknown", true) || it.equals("unknown artist", true) || it.equals("unknown album", true)
+private fun String?.usable(): String? = UnicodeText.display(this)?.takeUnless {
+    it.equals("<unknown>", true) || it.equals("unknown", true) || it.equals("unknown artist", true) || it.equals("unknown album", true)
 }
 
 private fun String.isGenericFolder(): Boolean = lowercase() in setOf(

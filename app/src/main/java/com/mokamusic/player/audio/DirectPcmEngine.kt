@@ -22,7 +22,9 @@ import androidx.media3.common.MediaItem
 import com.mokamusic.player.audio.dsp.DspChain
 import com.mokamusic.player.audio.dsp.DspFileLoader
 import com.mokamusic.player.audio.dsp.DspHeadroomEstimator
+import com.mokamusic.player.audio.dsp.DspRuntimeMonitor
 import com.mokamusic.player.audio.dsp.DspSettingsStore
+import com.mokamusic.player.audio.dsp.NormalizationMode
 import com.mokamusic.player.audio.dsp.DspStreamAdapter
 import com.mokamusic.player.audio.dsp.NativeDspChain
 import com.mokamusic.player.audio.dsp.PcmFloatCodec
@@ -31,6 +33,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -91,14 +94,22 @@ class DirectPcmEngine(
     @Volatile private var pauseRequested = false
     private val seekRequestMs = AtomicLong(NO_SEEK)
     private val generation = AtomicLong(0L)
+    private val dspSettingsRevision = AtomicLong(0L)
+    private val dspReloadExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "MokaDspBuilder").apply { priority = Thread.NORM_PRIORITY }
+    }
+    private val dspReloadLock = Any()
 
     @Volatile private var audioTrack: AudioTrack? = null
     @Volatile private var activeUsbDevice: AudioDeviceInfo? = null
     @Volatile private var playbackThread: Thread? = null
     @Volatile private var activeDspWriter: DspAudioWriter? = null
     @Volatile private var activeDspAdapter: DspStreamAdapter? = null
+    @Volatile private var dspReloadContext: DspReloadContext? = null
+    @Volatile private var preparedDspReload: PreparedDspReload? = null
     @Volatile private var lastUnderrunCount = 0
     @Volatile private var lastUnderrunLogMs = 0L
+    @Volatile private var lastPipelineMetricMs = 0L
 
     private var focusRequest: AudioFocusRequest? = null
 
@@ -113,6 +124,29 @@ class DirectPcmEngine(
         // With DSP enabled, route every local audio format through the decoder-backed PCM bridge
         // so MP3/AAC/Opus/etc. receive the same DDC/EQ/convolver chain as FLAC/WAV.
         return localLossless || dspRequested
+    }
+
+    /** True while the current direct stream is using the persistent float output path. */
+    val isFloatDspPath: Boolean
+        get() = activeDspWriter != null
+
+    /**
+     * Request an in-place DSP rebuild. The decoder, AudioTrack, audio focus and playback clock stay
+     * alive; the playback thread swaps the DSP chain between PCM blocks. This is safe only after a
+     * float path has already been created. Enabling DSP from a pure integer direct path still needs
+     * one route rebuild because the AudioTrack encoding changes to float.
+     */
+    fun requestDspHotReload(): Boolean {
+        if (activeDspWriter == null) return false
+        val context = dspReloadContext ?: return false
+        if (generation.get() != context.token) return false
+        val revision = dspSettingsRevision.incrementAndGet()
+        Log.i(AUDIO_LOG_TAG, "DSP hot reload requested revision=$revision")
+        val scheduled = runCatching {
+            dspReloadExecutor.execute { prepareDspHotReload(context, revision) }
+        }.isSuccess
+        if (!scheduled) Log.w(AUDIO_LOG_TAG, "DSP hot reload builder rejected revision=$revision")
+        return scheduled
     }
 
     fun prepare(item: MediaItem, startPositionMs: Long, playWhenReady: Boolean) {
@@ -133,7 +167,11 @@ class DirectPcmEngine(
             try {
                 val uri = item.localConfiguration?.uri
                     ?: throw DirectUnsupported("Missing local URI")
-                val dspRequested = DspSettingsStore(appContext).load().anyProcessingEnabled
+                val dspSettings = DspSettingsStore(appContext).load()
+                val dspRequested = dspSettings.anyProcessingEnabled
+                if (UsbDspSafetyPolicy.requiresDsp(appContext)) {
+                    Log.w(AUDIO_LOG_TAG, "Pixel 8a USB safety guard active: forcing saved DSP profile on")
+                }
                 val formatLabel = item.mediaMetadata.extras
                     ?.getString(AudioPathMonitor.EXTRA_FORMAT_LABEL)
                     .orEmpty()
@@ -230,7 +268,10 @@ class DirectPcmEngine(
         stopInternal(clearMonitor = true)
     }
 
-    fun release() = stop()
+    fun release() {
+        stop()
+        dspReloadExecutor.shutdownNow()
+    }
 
     private fun playWav(uri: Uri, item: MediaItem, startPositionMs: Long, token: Long) {
         val pfd = appContext.contentResolver.openFileDescriptor(uri, "r")
@@ -245,31 +286,38 @@ class DirectPcmEngine(
                 AudioPathMonitor.setSource(info.sampleRate, sourceBits, info.channels, encoding)
                 durationMs = if (info.byteRate > 0) info.dataSize * 1000L / info.byteRate else 0L
 
-                val dsp = createDspAdapter(info.sampleRate, info.channels, item)
+                var dsp = createDspAdapter(info.sampleRate, info.channels, item)
                 activeDspAdapter?.takeIf { it !== dsp }?.close()
                 activeDspAdapter = dsp
-                val dspActive = dsp != null
-                val outputEncoding = if (dspActive) AudioFormat.ENCODING_PCM_FLOAT else encoding
+                // Once a track starts on the float path, keep that AudioTrack alive even when the
+                // user temporarily disables DSP. Bypass becomes float-in/float-out until the next
+                // track instead of tearing down the decoder and output device mid-song.
+                val floatPath = dsp != null
+                var appliedDspRevision = dspSettingsRevision.get()
+                val outputEncoding = if (floatPath) AudioFormat.ENCODING_PCM_FLOAT else encoding
                 val track = buildAudioTrack(info.sampleRate, info.channels, outputEncoding)
                 audioTrack = track
-                val dspWriter = if (dspActive) {
+                val dspWriter = if (floatPath) {
                     DspAudioWriter(track, info.sampleRate, info.channels, token).also {
                         activeDspWriter = it
                     }
+                } else null
+                dspReloadContext = if (floatPath) {
+                    DspReloadContext(info.sampleRate, info.channels, item, "WAV", token)
                 } else null
                 currentPositionMs = startPositionMs.coerceIn(0L, durationMs.coerceAtLeast(startPositionMs))
                 val frameSize = max(1, info.blockAlign)
                 val startByte = ((currentPositionMs * info.byteRate) / 1000L / frameSize) * frameSize
                 channel.position(info.dataOffset + startByte.coerceAtMost(info.dataSize))
 
-                publishDirectOutput(track, info.sampleRate, info.channels, outputEncoding, if (dspActive) "Moka DSP · 32-bit float" else "Moka Direct WAV")
+                publishDirectOutput(track, info.sampleRate, info.channels, outputEncoding, if (floatPath) "Moka DSP · WAV · 32-bit float" else "Moka Direct WAV")
                 callback.onReady(durationMs)
                 // DSP used to start AudioTrack empty, then read/process almost a full second of
                 // audio at once. The track could drain before the next batch was ready. Feed much
                 // smaller chunks and pre-roll one chunk before starting playback.
-                if (!dspActive) startTrackIfRequested(track)
+                if (!floatPath) startTrackIfRequested(track)
 
-                val ioFrames = if (dspActive) DSP_IO_FRAMES else max(4096, info.sampleRate / 2)
+                val ioFrames = if (floatPath) DSP_IO_FRAMES else max(4096, info.sampleRate / 2)
                 val ioBytes = max(frameSize, ioFrames * frameSize)
                 val buffer = ByteBuffer.allocateDirect(ioBytes).order(ByteOrder.LITTLE_ENDIAN)
                 var bytesConsumed = startByte
@@ -285,7 +333,7 @@ class DirectPcmEngine(
                         currentPositionMs = target
                         dsp?.reset()
                         dspWriter?.resetForSeek()
-                        if (!dspActive) startTrackIfRequested(track)
+                        if (!floatPath) startTrackIfRequested(track)
                     }
 
                     if (pauseRequested || !playRequested) {
@@ -303,10 +351,22 @@ class DirectPcmEngine(
                     val read = channel.read(buffer)
                     if (read <= 0) break
                     buffer.flip()
-                    if (dspActive) {
+                    if (floatPath) {
+                        takePreparedDspReload(appliedDspRevision, dsp)?.let { prepared ->
+                            dsp = applyPreparedDspAdapter(
+                                current = dsp,
+                                replacement = prepared.adapter,
+                                revision = prepared.revision,
+                                sampleRate = info.sampleRate,
+                                channels = info.channels,
+                                track = track,
+                                streamLabel = "WAV"
+                            )
+                            appliedDspRevision = prepared.revision
+                        }
                         val samples = read / bytesPerSample(encoding)
                         val sourceFloat = PcmFloatCodec.decode(buffer.slice().order(ByteOrder.LITTLE_ENDIAN), encoding, samples)
-                        val processed = dsp!!.process(sourceFloat)
+                        val processed = dsp?.process(sourceFloat) ?: sourceFloat
                         if (processed.isNotEmpty()) {
                             dspWriter!!.enqueue(processed)
                         }
@@ -323,8 +383,8 @@ class DirectPcmEngine(
                 }
 
                 if (!stopRequested && generation.get() == token) {
-                    if (dspActive) {
-                        val tail = dsp!!.flush()
+                    if (floatPath) {
+                        val tail = dsp?.flush() ?: FloatArray(0)
                         if (tail.isNotEmpty()) dspWriter!!.enqueue(tail)
                         dspWriter!!.finishAndDrain()
                         if (activeDspWriter === dspWriter) activeDspWriter = null
@@ -423,8 +483,9 @@ class DirectPcmEngine(
         var actualRate = sourceRate
         var actualChannels = sourceChannels
         var dsp: DspStreamAdapter? = null
-        var dspActive = false
+        var floatPath = false
         var dspWriter: DspAudioWriter? = null
+        var appliedDspRevision = dspSettingsRevision.get()
 
         while (!outputEnded && !stopRequested && generation.get() == token) {
             val requestedSeek = seekRequestMs.getAndSet(NO_SEEK)
@@ -438,7 +499,7 @@ class DirectPcmEngine(
                 currentPositionMs = target
                 dsp?.reset()
                 dspWriter?.resetForSeek()
-                if (!dspActive) track?.let(::startTrackIfRequested)
+                if (!floatPath) track?.let(::startTrackIfRequested)
             }
 
             if (!inputEnded) {
@@ -475,30 +536,34 @@ class DirectPcmEngine(
                     dsp?.close()
                     dsp = createDspAdapter(actualRate, actualChannels, item)
                     activeDspAdapter = dsp
-                    dspActive = dsp != null
-                    if (!requireExactSource && !dspActive) {
+                    floatPath = dsp != null
+                    appliedDspRevision = dspSettingsRevision.get()
+                    if (!requireExactSource && !floatPath) {
                         throw DirectUnsupported("DSP was disabled while preparing; returning to Media3")
                     }
-                    val outputEncoding = if (dspActive) AudioFormat.ENCODING_PCM_FLOAT else actualEncoding
+                    val outputEncoding = if (floatPath) AudioFormat.ENCODING_PCM_FLOAT else actualEncoding
                     dspWriter?.stop()
                     val newTrack = buildAudioTrack(actualRate, actualChannels, outputEncoding)
                     track = newTrack
                     audioTrack = newTrack
-                    dspWriter = if (dspActive) {
+                    dspWriter = if (floatPath) {
                         DspAudioWriter(newTrack, actualRate, actualChannels, token).also {
                             activeDspWriter = it
                         }
                     } else null
                     val codecName = sourceMime.substringAfter('/').uppercase()
+                    dspReloadContext = if (floatPath) {
+                        DspReloadContext(actualRate, actualChannels, item, codecName, token)
+                    } else null
                     publishDirectOutput(
                         newTrack,
                         actualRate,
                         actualChannels,
                         outputEncoding,
-                        if (dspActive) "Moka DSP · $codecName · 32-bit float" else "Moka Direct $codecName"
+                        if (floatPath) "Moka DSP · $codecName · 32-bit float" else "Moka Direct $codecName"
                     )
                     callback.onReady(durationMs)
-                    if (!dspActive) startTrackIfRequested(newTrack)
+                    if (!floatPath) startTrackIfRequested(newTrack)
                 }
                 else -> if (outputIndex >= 0) {
                     val outputBuffer = codec.getOutputBuffer(outputIndex)
@@ -510,7 +575,19 @@ class DirectPcmEngine(
                         }
                         outputBuffer.position(info.offset)
                         outputBuffer.limit(info.offset + info.size)
-                        if (dspActive) {
+                        if (floatPath) {
+                            takePreparedDspReload(appliedDspRevision, dsp)?.let { prepared ->
+                                dsp = applyPreparedDspAdapter(
+                                    current = dsp,
+                                    replacement = prepared.adapter,
+                                    revision = prepared.revision,
+                                    sampleRate = actualRate,
+                                    channels = actualChannels,
+                                    track = activeTrack,
+                                    streamLabel = sourceMime.substringAfter('/').uppercase()
+                                )
+                                appliedDspRevision = prepared.revision
+                            }
                             val bytesPer = bytesPerSample(actualEncoding)
                             val samples = info.size / bytesPer
                             val sourceFloat = PcmFloatCodec.decode(
@@ -518,7 +595,7 @@ class DirectPcmEngine(
                                 actualEncoding,
                                 samples
                             )
-                            val processed = dsp!!.process(sourceFloat)
+                            val processed = dsp?.process(sourceFloat) ?: sourceFloat
                             if (processed.isNotEmpty()) {
                                 dspWriter!!.enqueue(processed)
                             }
@@ -537,8 +614,8 @@ class DirectPcmEngine(
         }
 
         if (outputEnded && !stopRequested && generation.get() == token) {
-            if (dspActive) {
-                val tail = dsp!!.flush()
+            if (floatPath) {
+                val tail = dsp?.flush() ?: FloatArray(0)
                 if (tail.isNotEmpty()) dspWriter?.enqueue(tail)
                 dspWriter?.finishAndDrain()
                 if (activeDspWriter === dspWriter) activeDspWriter = null
@@ -549,42 +626,152 @@ class DirectPcmEngine(
         }
     }
 
-    private fun logUnderrunsIfChanged(track: AudioTrack, queueDepth: Int? = null) {
+    private fun logUnderrunsIfChanged(
+        track: AudioTrack,
+        queueDepth: Int? = null,
+        primedFrames: Int? = null
+    ) {
         val count = runCatching { track.underrunCount }.getOrDefault(lastUnderrunCount)
+        val now = android.os.SystemClock.elapsedRealtime()
         if (count > lastUnderrunCount) {
             val previous = lastUnderrunCount
             lastUnderrunCount = count
-            val now = android.os.SystemClock.elapsedRealtime()
-            if (now - lastUnderrunLogMs >= 1000L) {
+            if (now - lastUnderrunLogMs >= 500L) {
                 Log.w(
                     AUDIO_LOG_TAG,
                     "AudioTrack underruns increased: $previous -> $count " +
                         "(buffer=${runCatching { track.bufferSizeInFrames }.getOrDefault(-1)} frames" +
-                        (queueDepth?.let { ", queue=$it/$DSP_QUEUE_PACKETS" } ?: "") + ")"
+                        (queueDepth?.let { ", queue=$it/$DSP_QUEUE_PACKETS" } ?: "") +
+                        (primedFrames?.let { ", primed=$it" } ?: "") + ")"
                 )
                 lastUnderrunLogMs = now
             }
         }
+        if (now - lastPipelineMetricMs >= 500L) {
+            DspRuntimeMonitor.updateAudioPipeline(
+                underruns = count,
+                queueDepth = queueDepth,
+                queueCapacity = queueDepth?.let { DSP_QUEUE_PACKETS },
+                primedFrames = primedFrames
+            )
+            lastPipelineMetricMs = now
+        }
     }
 
-    private fun createDspAdapter(sampleRate: Int, channels: Int, item: MediaItem): DspStreamAdapter? {
+    private fun prepareDspHotReload(context: DspReloadContext, revision: Long) {
+        // Coalesce stale preference changes before doing expensive IRS/FIR setup.
+        if (dspSettingsRevision.get() != revision || generation.get() != context.token) return
+
+        val built = runCatching {
+            createDspAdapter(
+                sampleRate = context.sampleRate,
+                channels = context.channels,
+                item = context.item,
+                publishPathState = false
+            )
+        }
+        if (built.isFailure) {
+            Log.w(AUDIO_LOG_TAG, "DSP hot reload build failed revision=$revision; keeping current chain", built.exceptionOrNull())
+            return
+        }
+        val adapter = built.getOrNull()
+
+        if (
+            dspSettingsRevision.get() != revision ||
+            generation.get() != context.token ||
+            dspReloadContext?.token != context.token ||
+            activeDspWriter == null
+        ) {
+            adapter?.close()
+            Log.i(AUDIO_LOG_TAG, "DSP hot reload discarded stale revision=$revision")
+            return
+        }
+
+        val stale = synchronized(dspReloadLock) {
+            val old = preparedDspReload
+            preparedDspReload = PreparedDspReload(revision, adapter)
+            old
+        }
+        stale?.adapter?.close()
+        Log.i(
+            AUDIO_LOG_TAG,
+            "DSP hot reload prepared revision=$revision stream=${context.streamLabel} " +
+                "mode=${if (adapter != null) "active" else "bypass"}"
+        )
+    }
+
+    private fun takePreparedDspReload(
+        appliedRevision: Long,
+        current: DspStreamAdapter?
+    ): PreparedDspReload? {
+        if (current != null && !current.isAtBlockBoundary) return null
+        return synchronized(dspReloadLock) {
+            val prepared = preparedDspReload ?: return@synchronized null
+            if (prepared.revision <= appliedRevision || prepared.revision != dspSettingsRevision.get()) {
+                preparedDspReload = null
+                prepared.adapter?.close()
+                null
+            } else {
+                preparedDspReload = null
+                prepared
+            }
+        }
+    }
+
+    private fun applyPreparedDspAdapter(
+        current: DspStreamAdapter?,
+        replacement: DspStreamAdapter?,
+        revision: Long,
+        sampleRate: Int,
+        channels: Int,
+        track: AudioTrack,
+        streamLabel: String
+    ): DspStreamAdapter? {
+        current?.close()
+        activeDspAdapter = replacement
+        DspRuntimeMonitor.resetSignal()
+        DspRuntimeMonitor.noteHotReload()
+        val label = if (replacement != null) {
+            "Moka DSP · $streamLabel · 32-bit float"
+        } else {
+            "Moka Float bypass · $streamLabel · 32-bit float"
+        }
+        publishDirectOutput(track, sampleRate, channels, AudioFormat.ENCODING_PCM_FLOAT, label)
+        Log.i(
+            AUDIO_LOG_TAG,
+            "DSP hot reload applied revision=$revision: ${if (replacement != null) "active" else "bypass"}; " +
+                "rate=$sampleRate channels=$channels AudioTrack preserved"
+        )
+        return replacement
+    }
+
+    private fun createDspAdapter(
+        sampleRate: Int,
+        channels: Int,
+        item: MediaItem,
+        publishPathState: Boolean = true
+    ): DspStreamAdapter? {
         val settings = DspSettingsStore(appContext).load()
         if (!settings.anyProcessingEnabled) return null
         val loader = DspFileLoader(appContext)
         val ddc = if (settings.ddcEnabled) runCatching { loader.loadVdc(settings.ddcUri) }.getOrNull() else null
         val irs = if (settings.convolverEnabled) runCatching { loader.loadIrs(settings.convolverUri) }.getOrNull() else null
         val extras = item.mediaMetadata.extras
-        val normalizationGainDb = extras
+        val trackGainDb = extras
             ?.takeIf { it.containsKey(AudioPathMonitor.EXTRA_NORMALIZATION_GAIN_DB) }
             ?.getFloat(AudioPathMonitor.EXTRA_NORMALIZATION_GAIN_DB)
+        val albumGainDb = extras
+            ?.takeIf { it.containsKey(AudioPathMonitor.EXTRA_ALBUM_NORMALIZATION_GAIN_DB) }
+            ?.getFloat(AudioPathMonitor.EXTRA_ALBUM_NORMALIZATION_GAIN_DB)
+        val normalizationGainDb = when (settings.normalizationMode) {
+            NormalizationMode.ALBUM -> albumGainDb ?: trackGainDb
+            NormalizationMode.TRACK -> trackGainDb
+        }
 
-        // Native C++ is the primary path for FIR/DDC/convolution. The previous Kotlin FFT path
-        // benchmarked below realtime on the reference phone even with a two-second AudioTrack.
-        // Keep the Kotlin chain as a compatibility fallback if the NDK library cannot be loaded
-        // or when a still-Kotlin-only multimodal IIR mode is selected.
+        // Native C++ is the primary path for FIR/IIR/DDC/convolution. Keep the Kotlin chain only
+        // as a compatibility fallback if the NDK library cannot be loaded or native creation fails.
         val nativeBlockFrames = when {
-            sampleRate >= 176_400 -> 16_384
-            sampleRate >= 88_200 -> 8_192
+            sampleRate >= 176_400 -> 8_192
             else -> 4_096
         }
         val nativeChain = runCatching {
@@ -609,8 +796,8 @@ class DirectPcmEngine(
             irs = irs,
             normalizationGainDb = normalizationGainDb,
             blockSize = when {
-                sampleRate >= 176_400 -> 16_384
-                else -> 8_192
+                sampleRate >= 176_400 -> 8_192
+                else -> 4_096
             }
         )
 
@@ -626,7 +813,9 @@ class DirectPcmEngine(
             "DSP engine=${chain.implementationLabel}, block=${chain.blockSize} frames, " +
                 "autoHeadroom=${"%.1f".format(automaticHeadroomDb)} dB"
         )
-        AudioPathMonitor.beginDirectPath("Moka DSP · ${chain.implementationLabel} · 32-bit float")
+        if (publishPathState) {
+            AudioPathMonitor.beginDirectPath("Moka DSP · ${chain.implementationLabel} · 32-bit float")
+        }
         return DspStreamAdapter(chain, channels, sampleRate, automaticHeadroomDb)
     }
 
@@ -659,11 +848,11 @@ class DirectPcmEngine(
         val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
         if (minBuffer <= 0) throw DirectUnsupported("Device does not accept ${encoding.pcmEncodingLabel()} at ${sampleRate}Hz")
         val frameBytes = bytesPerSample(encoding) * channels
-        // Device logs from v3.4 showed DSP was slightly slower than real time even with a
-        // one-second sink buffer. Music playback can afford more latency, so keep roughly two
-        // seconds in AudioTrack and prime most of it before starting.
-        val targetFrames = max(16_384, sampleRate * 2)
-        val bufferBytes = max(minBuffer * 8, frameBytes * targetFrames)
+        // Keep enough capacity to absorb scheduler jitter, but use a smaller active stream buffer
+        // after creation. The previous two-second active buffer made DSP toggles sluggish and still
+        // did not prevent starvation when the producer fell behind.
+        val capacityFrames = max(16_384, sampleRate * 2)
+        val bufferBytes = max(minBuffer * 8, frameBytes * capacityFrames)
 
         val mixer = if (Build.VERSION.SDK_INT >= 34) selectExactUsbMixer(format) else null
         val builder = AudioTrack.Builder()
@@ -679,8 +868,13 @@ class DirectPcmEngine(
             throw DirectUnsupported("AudioTrack failed to initialize")
         }
         activeUsbDevice?.let { device -> runCatching { track.setPreferredDevice(device) } }
+        val minFrames = max(1, (minBuffer + frameBytes - 1) / frameBytes)
+        val desiredRuntimeFrames = max(minFrames * 2, sampleRate * 3 / 4)
+            .coerceAtMost(runCatching { track.bufferCapacityInFrames }.getOrDefault(capacityFrames))
+        runCatching { track.setBufferSizeInFrames(desiredRuntimeFrames) }
         lastUnderrunCount = runCatching { track.underrunCount }.getOrDefault(0)
         lastUnderrunLogMs = 0L
+        lastPipelineMetricMs = 0L
         Log.i(
             AUDIO_LOG_TAG,
             "AudioTrack created: rate=$sampleRate channels=$channels encoding=${encoding.pcmEncodingLabel()} " +
@@ -737,6 +931,14 @@ class DirectPcmEngine(
             usbTransportVerified = verified,
             label = label
         )
+        val routed = runCatching { track.routedDevice }.getOrNull()
+        Log.i(
+            AUDIO_LOG_TAG,
+            "Output route: label=$label rate=${track.format.sampleRate} encoding=${track.format.encoding.pcmEncodingLabel()} " +
+                "channels=${track.format.channelCount} deviceId=${routed?.id ?: -1} " +
+                "deviceType=${routed?.type ?: -1} product=${routed?.productName ?: "unknown"} " +
+                "usbBitPerfectVerified=$verified"
+        )
     }
 
     @RequiresApi(34)
@@ -748,6 +950,21 @@ class DirectPcmEngine(
             clearPreferredUsbMixer()
             return null
         }
+        Log.i(
+            AUDIO_LOG_TAG,
+            "USB candidate: id=${usbDevice.id} type=${usbDevice.type} product=${usbDevice.productName} " +
+                "rates=${usbDevice.sampleRates.joinToString()} channels=${usbDevice.channelCounts.joinToString()}"
+        )
+
+        if (UsbDspSafetyPolicy.shouldAvoidBitPerfect(appContext, usbDevice)) {
+            clearPreferredUsbMixer()
+            runCatching { audioManager.clearPreferredMixerAttributes(mediaAttributes, usbDevice) }
+            Log.w(
+                AUDIO_LOG_TAG,
+                "Pixel 8a USB safety guard: DSP path retained; BIT_PERFECT mixer intentionally not selected"
+            )
+            return null
+        }
 
         val exact = runCatching { audioManager.getSupportedMixerAttributes(usbDevice) }
             .getOrDefault(emptyList())
@@ -757,6 +974,11 @@ class DirectPcmEngine(
                     mixer.format.encoding == format.encoding &&
                     mixer.format.channelCount == format.channelCount
             } ?: run {
+                Log.i(
+                    AUDIO_LOG_TAG,
+                    "USB exact mixer unavailable for rate=${format.sampleRate} " +
+                        "encoding=${format.encoding.pcmEncodingLabel()} channels=${format.channelCount}"
+                )
                 clearPreferredUsbMixer()
                 return null
             }
@@ -766,6 +988,12 @@ class DirectPcmEngine(
             audioManager.setPreferredMixerAttributes(mediaAttributes, usbDevice, exact)
         }.getOrDefault(false)
         activeUsbDevice = usbDevice.takeIf { selected }
+        Log.i(
+            AUDIO_LOG_TAG,
+            "USB exact mixer ${if (selected) "selected" else "rejected"}: deviceId=${usbDevice.id} " +
+                "rate=${exact.format.sampleRate} encoding=${exact.format.encoding.pcmEncodingLabel()} " +
+                "channels=${exact.format.channelCount}"
+        )
         return exact.takeIf { selected }
     }
 
@@ -828,10 +1056,18 @@ class DirectPcmEngine(
         stopRequested = true
         playRequested = false
         pauseRequested = true
+        dspReloadContext = null
+        val pending = synchronized(dspReloadLock) {
+            val old = preparedDspReload
+            preparedDspReload = null
+            old
+        }
+        pending?.adapter?.close()
         activeDspWriter?.stop()
         activeDspWriter = null
         activeDspAdapter?.close()
         activeDspAdapter = null
+        DspRuntimeMonitor.clear()
         runCatching { audioTrack?.pause() }
         runCatching { audioTrack?.flush() }
         releaseAudioTrack()
@@ -1084,8 +1320,8 @@ class DirectPcmEngine(
             var offset = 0
             val capacityFrames = runCatching { track.bufferCapacityInFrames }.getOrDefault(sampleRate * 2)
             val primeTargetFrames = minOf(
-                max(DSP_PRIME_MIN_FRAMES, sampleRate * 3 / 2),
-                max(DSP_PRIME_MIN_FRAMES, capacityFrames * 3 / 4)
+                max(DSP_PRIME_MIN_FRAMES, sampleRate * DSP_PRIME_TARGET_MS / 1000),
+                max(DSP_PRIME_MIN_FRAMES, capacityFrames * 2 / 3)
             )
             val primeTargetSamples = primeTargetFrames * channels
 
@@ -1135,18 +1371,32 @@ class DirectPcmEngine(
                         }
                     }
                 }
-                logUnderrunsIfChanged(track, queue.size)
+                logUnderrunsIfChanged(track, queue.size, primedSamples.get() / channels)
             }
         }
     }
+
+    private data class DspReloadContext(
+        val sampleRate: Int,
+        val channels: Int,
+        val item: MediaItem,
+        val streamLabel: String,
+        val token: Long
+    )
+
+    private data class PreparedDspReload(
+        val revision: Long,
+        val adapter: DspStreamAdapter?
+    )
 
     private class DirectUnsupported(message: String) : Exception(message)
 
     companion object {
         private const val AUDIO_LOG_TAG = "MokaAudio"
         private const val DSP_IO_FRAMES = 4096
-        private const val DSP_PRIME_MIN_FRAMES = 16_384
-        private const val DSP_QUEUE_PACKETS = 64
+        private const val DSP_PRIME_MIN_FRAMES = 8_192
+        private const val DSP_PRIME_TARGET_MS = 500
+        private const val DSP_QUEUE_PACKETS = 24
         private const val DSP_DRAIN_TIMEOUT_SECONDS = 8L
         private const val NO_SEEK = -1L
         private const val WAVE_FORMAT_PCM = 0x0001

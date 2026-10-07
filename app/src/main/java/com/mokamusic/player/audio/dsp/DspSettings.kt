@@ -2,6 +2,7 @@ package com.mokamusic.player.audio.dsp
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.mokamusic.player.audio.UsbDspSafetyPolicy
 
 enum class EqMode(val label: String) {
     FIR_MINIMUM_PHASE("FIR Minimum phase"),
@@ -10,6 +11,11 @@ enum class EqMode(val label: String) {
     IIR_8("IIR 8th order"),
     IIR_10("IIR 10th order"),
     IIR_12("IIR 12th order")
+}
+
+enum class NormalizationMode(val label: String) {
+    TRACK("Track"),
+    ALBUM("Album")
 }
 
 enum class EqInterpolator(val label: String) {
@@ -25,6 +31,7 @@ data class DspSettings(
     val postGainDb: Float = 0f,
     val autoHeadroomEnabled: Boolean = true,
     val normalizationEnabled: Boolean = false,
+    val normalizationMode: NormalizationMode = NormalizationMode.TRACK,
     val normalizationAdaptiveFallback: Boolean = true,
     val normalizationPreampDb: Float = 0f,
     val eqEnabled: Boolean = true,
@@ -52,7 +59,8 @@ data class DspSettings(
 }
 
 class DspSettingsStore(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     fun registerListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) = prefs.registerOnSharedPreferenceChangeListener(listener)
     fun unregisterListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) = prefs.unregisterOnSharedPreferenceChangeListener(listener)
@@ -63,7 +71,7 @@ class DspSettingsStore(context: Context) {
             ?.mapNotNull { it.toFloatOrNull() }
             ?.takeIf { it.size == DspSettings.EQ_FREQUENCIES_HZ.size }
             ?: DspSettings.FAVORITE_EQ_GAINS
-        return DspSettings(
+        val stored = DspSettings(
             masterEnabled = prefs.getBoolean(KEY_MASTER, false),
             limiterEnabled = prefs.getBoolean(KEY_LIMITER, true),
             limiterThresholdDb = prefs.getFloat(KEY_LIMITER_THRESHOLD, -12f),
@@ -71,6 +79,9 @@ class DspSettingsStore(context: Context) {
             postGainDb = prefs.getFloat(KEY_POST_GAIN, 0f),
             autoHeadroomEnabled = prefs.getBoolean(KEY_AUTO_HEADROOM, true),
             normalizationEnabled = prefs.getBoolean(KEY_NORMALIZATION, false),
+            normalizationMode = runCatching {
+                NormalizationMode.valueOf(prefs.getString(KEY_NORMALIZATION_MODE, NormalizationMode.TRACK.name)!!)
+            }.getOrDefault(NormalizationMode.TRACK),
             normalizationAdaptiveFallback = prefs.getBoolean(KEY_NORMALIZATION_ADAPTIVE, true),
             normalizationPreampDb = prefs.getFloat(KEY_NORMALIZATION_PREAMP, 0f),
             eqEnabled = prefs.getBoolean(KEY_EQ_ENABLED, true),
@@ -85,6 +96,14 @@ class DspSettingsStore(context: Context) {
             convolverName = prefs.getString(KEY_CONV_NAME, null),
             convolverGainDb = prefs.getFloat(KEY_CONV_GAIN, 0f)
         )
+        return if (UsbDspSafetyPolicy.requiresDsp(appContext)) {
+            val guarded = stored.copy(masterEnabled = true)
+            // Preserve the user's profile. If every processing stage was manually disabled,
+            // keep the float DSP route alive with the existing limiter settings as a fallback.
+            if (guarded.anyProcessingEnabled) guarded else guarded.copy(limiterEnabled = true)
+        } else {
+            stored
+        }
     }
 
     fun save(settings: DspSettings) {
@@ -96,6 +115,7 @@ class DspSettingsStore(context: Context) {
             .putFloat(KEY_POST_GAIN, settings.postGainDb)
             .putBoolean(KEY_AUTO_HEADROOM, settings.autoHeadroomEnabled)
             .putBoolean(KEY_NORMALIZATION, settings.normalizationEnabled)
+            .putString(KEY_NORMALIZATION_MODE, settings.normalizationMode.name)
             .putBoolean(KEY_NORMALIZATION_ADAPTIVE, settings.normalizationAdaptiveFallback)
             .putFloat(KEY_NORMALIZATION_PREAMP, settings.normalizationPreampDb)
             .putBoolean(KEY_EQ_ENABLED, settings.eqEnabled)
@@ -121,6 +141,7 @@ class DspSettingsStore(context: Context) {
         const val KEY_POST_GAIN = "post_gain"
         const val KEY_AUTO_HEADROOM = "auto_headroom"
         const val KEY_NORMALIZATION = "normalization"
+        const val KEY_NORMALIZATION_MODE = "normalization_mode"
         const val KEY_NORMALIZATION_ADAPTIVE = "normalization_adaptive"
         const val KEY_NORMALIZATION_PREAMP = "normalization_preamp"
         const val KEY_EQ_ENABLED = "eq_enabled"

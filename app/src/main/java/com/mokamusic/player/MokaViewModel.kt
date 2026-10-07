@@ -18,6 +18,9 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.mokamusic.player.audio.AudioOutputInspector
 import com.mokamusic.player.audio.AudioOutputStatus
 import com.mokamusic.player.audio.AudioPathMonitor
+import com.mokamusic.player.audio.Bs1770LoudnessAnalyzer
+import com.mokamusic.player.audio.LoudnessAnalysisStore
+import com.mokamusic.player.audio.LoudnessRecord
 import com.mokamusic.player.audio.dsp.DspDeviceProfileStore
 import com.mokamusic.player.audio.dsp.DspMeterSnapshot
 import com.mokamusic.player.audio.dsp.DspPresetId
@@ -29,14 +32,21 @@ import com.mokamusic.player.audio.dsp.classifyRoute
 import com.mokamusic.player.data.AudioTechnicalMetadata
 import com.mokamusic.player.data.AudioTechnicalMetadataReader
 import com.mokamusic.player.data.MusicLibraryRepository
+import com.mokamusic.player.data.ArtworkLoader
+import com.mokamusic.player.metadata.LibraryEnricher
+import com.mokamusic.player.metadata.OnlineMetadataStore
 import com.mokamusic.player.model.MusicTrack
 import com.mokamusic.player.playback.PlaybackService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.log10
+import kotlin.math.pow
 
 data class MokaUiState(
     val tracks: List<MusicTrack> = emptyList(),
@@ -59,7 +69,18 @@ data class MokaUiState(
     val currentQueueIndex: Int = -1,
     val favoriteIds: Set<Long> = emptySet(),
     val dspMeters: DspMeterSnapshot = DspMeterSnapshot(),
-    val activeRouteProfile: RouteClass? = null
+    val activeRouteProfile: RouteClass? = null,
+    val metadataEnrichmentRunning: Boolean = false,
+    val metadataEnrichmentCompleted: Int = 0,
+    val metadataEnrichmentTotal: Int = 0,
+    val metadataEnrichmentMatched: Int = 0,
+    val metadataEnrichmentFailed: Int = 0,
+    val metadataEnrichmentStatus: String? = null,
+    val loudnessAnalysisRunning: Boolean = false,
+    val loudnessAnalysisCompleted: Int = 0,
+    val loudnessAnalysisTotal: Int = 0,
+    val loudnessAnalysisFailed: Int = 0,
+    val loudnessAnalysisStatus: String? = null
 )
 
 class MokaViewModel(application: Application) : AndroidViewModel(application) {
@@ -69,6 +90,10 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private val dspStore = DspSettingsStore(application)
     private val deviceProfiles = DspDeviceProfileStore(application)
     private val favoritePrefs = application.getSharedPreferences("moka_favorites", android.content.Context.MODE_PRIVATE)
+    private val libraryEnricher = LibraryEnricher(application)
+    private val onlineMetadataStore = OnlineMetadataStore(application)
+    private val loudnessStore = LoudnessAnalysisStore(application)
+    private val loudnessAnalyzer = Bs1770LoudnessAnalyzer(application)
 
     private val _uiState = MutableStateFlow(MokaUiState())
     val uiState: StateFlow<MokaUiState> = _uiState.asStateFlow()
@@ -311,6 +336,159 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         dspStore.save(DspPresets.apply(preset, current))
     }
 
+    fun enrichOnlineMetadata(forceRefresh: Boolean = false) {
+        if (_uiState.value.metadataEnrichmentRunning) return
+        val tracks = _uiState.value.tracks
+        if (tracks.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                metadataEnrichmentRunning = true,
+                metadataEnrichmentCompleted = 0,
+                metadataEnrichmentTotal = 0,
+                metadataEnrichmentMatched = 0,
+                metadataEnrichmentFailed = 0,
+                metadataEnrichmentStatus = "Preparing MusicBrainz album matching…"
+            )
+            runCatching {
+                libraryEnricher.enrichAlbums(tracks, forceRefresh) { progress ->
+                    _uiState.value = _uiState.value.copy(
+                        metadataEnrichmentCompleted = progress.completed,
+                        metadataEnrichmentTotal = progress.total,
+                        metadataEnrichmentMatched = progress.matched,
+                        metadataEnrichmentFailed = progress.failed,
+                        metadataEnrichmentStatus = progress.current?.let { "Matching $it" }
+                    )
+                }
+            }.onSuccess { final ->
+                ArtworkLoader.clearMemoryCache()
+                val refreshed = runCatching { repository.scan() }.getOrDefault(_uiState.value.tracks)
+                _uiState.value = _uiState.value.copy(
+                    tracks = refreshed,
+                    metadataEnrichmentRunning = false,
+                    metadataEnrichmentCompleted = final.completed,
+                    metadataEnrichmentTotal = final.total,
+                    metadataEnrichmentMatched = final.matched,
+                    metadataEnrichmentFailed = final.failed,
+                    metadataEnrichmentStatus = "Matched ${final.matched}/${final.total} albums · ${final.failed} request errors"
+                )
+            }.onFailure { error ->
+                CrashLogStore.nonFatal(getApplication(), "MusicBrainz enrichment", error)
+                _uiState.value = _uiState.value.copy(
+                    metadataEnrichmentRunning = false,
+                    metadataEnrichmentStatus = "Enrichment stopped: ${error.message ?: error.javaClass.simpleName}"
+                )
+            }
+        }
+    }
+
+    fun clearOnlineMetadata() {
+        onlineMetadataStore.clear()
+        ArtworkLoader.clearMemoryCache()
+        viewModelScope.launch {
+            val refreshed = runCatching { repository.scan() }.getOrDefault(_uiState.value.tracks)
+            _uiState.value = _uiState.value.copy(
+                tracks = refreshed,
+                metadataEnrichmentStatus = "Online metadata cache cleared"
+            )
+        }
+    }
+
+    fun analyzeLoudnessForNormalization() {
+        if (_uiState.value.loudnessAnalysisRunning) return
+        val tracks = _uiState.value.tracks
+        if (tracks.isEmpty()) return
+        controller?.pause()
+        viewModelScope.launch {
+            val albumGroups = tracks.groupBy { track ->
+                val artist = track.albumArtist?.takeIf(String::isNotBlank) ?: track.artist
+                com.mokamusic.player.data.UnicodeText.key(artist) + "\u0000" + com.mokamusic.player.data.UnicodeText.key(track.album)
+            }
+            val targets = albumGroups.values.flatten()
+            _uiState.value = _uiState.value.copy(
+                loudnessAnalysisRunning = true,
+                loudnessAnalysisCompleted = 0,
+                loudnessAnalysisTotal = targets.size,
+                loudnessAnalysisFailed = 0,
+                loudnessAnalysisStatus = "Offline loudness analysis started · playback paused"
+            )
+
+            var completed = 0
+            var failed = 0
+            val analyzed = LinkedHashMap<Long, LoudnessRecord>()
+
+            withContext(Dispatchers.IO) {
+                for (track in targets) {
+                    val existing = loudnessStore.get(track)
+                    if (existing != null) {
+                        analyzed[track.id] = existing
+                    } else {
+                        runCatching { loudnessAnalyzer.analyze(track) }
+                            .onSuccess { result ->
+                                analyzed[track.id] = LoudnessRecord(
+                                    trackId = track.id,
+                                    fingerprint = LoudnessAnalysisStore.fingerprint(track),
+                                    integratedLufs = result.integratedLufs,
+                                    estimatedTruePeakDbtp = result.estimatedTruePeakDbtp,
+                                    trackGainDb = result.trackGainDb
+                                )
+                            }
+                            .onFailure {
+                                failed++
+                                CrashLogStore.nonFatal(getApplication(), "Loudness analysis: ${track.displayName}", it)
+                            }
+                    }
+                    completed++
+                    _uiState.value = _uiState.value.copy(
+                        loudnessAnalysisCompleted = completed,
+                        loudnessAnalysisFailed = failed,
+                        loudnessAnalysisStatus = "Analyzing ${track.artist} — ${track.title}"
+                    )
+                }
+
+                val withAlbumGain = ArrayList<LoudnessRecord>()
+                albumGroups.values.forEach { albumTracks ->
+                    val usable = albumTracks.mapNotNull { t -> analyzed[t.id]?.let { t to it } }
+                    if (usable.isEmpty()) return@forEach
+                    var weightedEnergy = 0.0
+                    var weight = 0.0
+                    usable.forEach { (track, record) ->
+                        val durationWeight = track.durationMs.coerceAtLeast(1L).toDouble()
+                        val energy = 10.0.pow((record.integratedLufs + 0.691) / 10.0)
+                        weightedEnergy += energy * durationWeight
+                        weight += durationWeight
+                    }
+                    val albumLufs = if (weight > 0.0 && weightedEnergy > 0.0) {
+                        (-0.691 + 10.0 * log10(weightedEnergy / weight)).toFloat()
+                    } else null
+                    val albumGain = albumLufs?.let { (-18f - it).coerceIn(-30f, 20f) }
+                    usable.forEach { (_, record) -> withAlbumGain += record.copy(albumGainDb = albumGain) }
+                }
+                loudnessStore.putAll(withAlbumGain)
+            }
+
+            val refreshed = runCatching { repository.scan() }.getOrDefault(_uiState.value.tracks)
+            _uiState.value = _uiState.value.copy(
+                tracks = refreshed,
+                loudnessAnalysisRunning = false,
+                loudnessAnalysisCompleted = completed,
+                loudnessAnalysisTotal = targets.size,
+                loudnessAnalysisFailed = failed,
+                loudnessAnalysisStatus = "Analyzed ${completed - failed}/${targets.size} tracks · $failed failures"
+            )
+        }
+    }
+
+    fun clearLoudnessAnalysis() {
+        loudnessStore.clear()
+        viewModelScope.launch {
+            val refreshed = runCatching { repository.scan() }.getOrDefault(_uiState.value.tracks)
+            _uiState.value = _uiState.value.copy(
+                tracks = refreshed,
+                loudnessAnalysisStatus = "Offline loudness cache cleared"
+            )
+        }
+    }
+
     fun buildDiagnostics(): String {
         val app = getApplication<Application>()
         val state = _uiState.value
@@ -333,12 +511,19 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                 appendLine("Track: ${t.artist} — ${t.title}")
                 appendLine("Album: ${t.album}")
                 appendLine("Format: ${t.formatLabel} ${t.bitDepth ?: "?"}-bit ${t.sampleRateHz ?: "?"} Hz")
+                appendLine("Track normalization gain: ${t.normalizationGainDb?.let { "%.2f dB".format(it) } ?: "none"}")
+                appendLine("Album normalization gain: ${t.albumNormalizationGainDb?.let { "%.2f dB".format(it) } ?: "none"}")
+                t.musicBrainzReleaseGroupId?.let { appendLine("MusicBrainz release-group: $it") }
+                loudnessStore.get(t)?.let { r ->
+                    appendLine("Offline integrated loudness: ${"%.2f".format(r.integratedLufs)} LUFS")
+                    appendLine("Offline true-peak estimate: ${"%.2f".format(r.estimatedTruePeakDbtp)} dBTP est.")
+                }
             }
             appendLine()
             appendLine("DSP settings")
             appendLine("Master: ${settings.masterEnabled}")
             appendLine("Auto headroom: ${settings.autoHeadroomEnabled}")
-            appendLine("Normalization: ${settings.normalizationEnabled}")
+            appendLine("Normalization: ${settings.normalizationEnabled} / ${settings.normalizationMode.label}")
             appendLine("EQ: ${settings.eqEnabled} / ${settings.eqMode.label}")
             appendLine("DDC: ${settings.ddcEnabled} / ${settings.ddcName ?: "none"}")
             appendLine("Convolver: ${settings.convolverEnabled} / ${settings.convolverName ?: "none"}")
@@ -349,8 +534,17 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("Automatic headroom: ${meters.automaticHeadroomDb} dB")
             appendLine("Input peak: ${meters.inputPeakDbfs} dBFS")
             appendLine("Output peak: ${meters.outputPeakDbfs} dBFS")
+            appendLine("Inter-sample peak estimate: ${meters.intersamplePeakDbfs} dBFS")
             appendLine("Near/full-scale samples: ${meters.clippedSamples}")
             appendLine("DSP throughput: ${meters.throughputX?.let { "%.2fx".format(it) } ?: "n/a"}")
+            appendLine("AudioTrack underruns: ${meters.audioTrackUnderruns}")
+            appendLine("DSP queue: ${meters.dspQueueDepth?.let { depth -> "$depth/${meters.dspQueueCapacity ?: "?"}" } ?: "n/a"}")
+            appendLine("DSP primed frames: ${meters.primedFrames ?: 0}")
+            appendLine("DSP in-place reloads: ${meters.hotReloadCount}")
+            appendLine()
+            appendLine("Library enrichment")
+            appendLine("MusicBrainz album matches cached: ${onlineMetadataStore.count()}")
+            appendLine("Offline loudness records cached: ${loudnessStore.count()}")
             CrashLogStore.lastError(app)?.let {
                 appendLine()
                 appendLine("Last non-fatal error")
@@ -370,6 +564,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
             track.bitDepth?.let { putInt(AudioPathMonitor.EXTRA_BIT_DEPTH, it) }
             track.channelCount?.let { putInt(AudioPathMonitor.EXTRA_CHANNEL_COUNT, it) }
             track.normalizationGainDb?.let { putFloat(AudioPathMonitor.EXTRA_NORMALIZATION_GAIN_DB, it) }
+            track.albumNormalizationGainDb?.let { putFloat(AudioPathMonitor.EXTRA_ALBUM_NORMALIZATION_GAIN_DB, it) }
             putString(AudioPathMonitor.EXTRA_FORMAT_LABEL, track.formatLabel)
         }
 
