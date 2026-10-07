@@ -90,5 +90,6 @@ Use `scripts/beta1-usb-matrix.sh` and `docs/BETA1_USB_TEST_MATRIX.md`.
 - [x] MusicBrainz rate-limit / User-Agent behavior
 - [x] streaming-service credentials removed from Beta product path
 - [ ] verify upgrade from the last signed release without data loss
-- [ ] run dependency/source-license inventory before store/commercial distribution
-- [ ] final JamesDSP/DSPManager source-provenance review
+- [x] initial dependency/source-license inventory and release-audit tooling added
+- [ ] final resolved/transitive release dependency NOTICE/license audit
+- [ ] final JamesDSP/DSPManager DSP source-provenance review and sign-off

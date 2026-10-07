@@ -35,3 +35,13 @@ Optional artwork enrichment can request front-cover images through the Cover Art
 
 - https://coverartarchive.org/
 - https://musicbrainz.org/doc/Cover_Art_Archive/API
+
+
+## Release audit status
+
+The stable-release dependency and source-provenance review is tracked in:
+
+- `docs/release/DEPENDENCY_LICENSE_INVENTORY.md`
+- `docs/release/DSP_SOURCE_PROVENANCE.md`
+
+The direct dependency inventory has been started, but the full resolved/transitive dependency audit and DSP provenance sign-off remain release gates. Acknowledgement of an upstream project here does not by itself determine whether attribution or other license obligations apply to Moka's implementation.
