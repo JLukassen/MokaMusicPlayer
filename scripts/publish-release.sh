@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Build, verify and publish a signed Moka APK to GitHub Releases.
 # Usage:
-#   ./scripts/publish-release.sh v3.7.0-alpha01
+#   ./scripts/publish-release.sh [v4.0.0-beta01]
 #
 # Requirements:
 #   - gh authenticated with write access to the repository
@@ -11,12 +11,7 @@ set -euo pipefail
 #   - Android SDK build-tools containing apksigner
 #   - a clean Git working tree
 
-TAG="${1:-}"
-if [[ -z "$TAG" ]]; then
-  echo "Usage: $0 v3.7.0-alpha01" >&2
-  exit 2
-fi
-
+TAG="${1:-v4.0.0-beta01}"
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$ROOT" ]]; then
   echo "Run this inside the Moka Git repository." >&2
@@ -94,11 +89,20 @@ if gh release view "$TAG" >/dev/null 2>&1; then
   gh release upload "$TAG" "$RELEASE_APK#Moka Music Player Android APK" --clobber
 else
   echo "Creating GitHub prerelease $TAG..."
-  gh release create "$TAG" \
-    "$RELEASE_APK#Moka Music Player Android APK" \
-    --prerelease \
-    --title "Moka Music Player $TAG" \
-    --generate-notes
+  NOTES_FILE="RELEASE_NOTES_v4.0.0-beta01.md"
+  if [[ "$TAG" == "v4.0.0-beta01" && -f "$NOTES_FILE" ]]; then
+    gh release create "$TAG" \
+      "$RELEASE_APK#Moka Music Player Android APK" \
+      --prerelease \
+      --title "Moka Music Player 4.0 Beta 1" \
+      --notes-file "$NOTES_FILE"
+  else
+    gh release create "$TAG" \
+      "$RELEASE_APK#Moka Music Player Android APK" \
+      --prerelease \
+      --title "Moka Music Player $TAG" \
+      --generate-notes
+  fi
 fi
 
 echo
