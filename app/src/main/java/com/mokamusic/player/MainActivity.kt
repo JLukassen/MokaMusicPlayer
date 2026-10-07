@@ -1504,7 +1504,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "Beta 3 keeps the validated playback/DSP engine frozen while hardening offline loudness analysis with direct WAV PCM, resumable checkpoints and per-track performance diagnostics.",
+                        "Beta 3 keeps the validated playback/DSP engine frozen while hardening offline loudness analysis with direct WAV PCM, resumable checkpoints, restored progress after relaunch and per-track performance diagnostics.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

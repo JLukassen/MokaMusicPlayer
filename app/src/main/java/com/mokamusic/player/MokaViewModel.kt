@@ -109,6 +109,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private val metadataNamePreferenceStore = MetadataNamePreferenceStore(application)
     private val loudnessStore = LoudnessAnalysisStore(application)
     private val loudnessAnalyzer = Bs1770LoudnessAnalyzer(application)
+    private val loudnessSessionPrefs = application.getSharedPreferences("moka_loudness_session", android.content.Context.MODE_PRIVATE)
 
     private val _uiState = MutableStateFlow(MokaUiState())
     val uiState: StateFlow<MokaUiState> = _uiState.asStateFlow()
@@ -153,6 +154,11 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                 favoriteIds = favorites
             )
             syncPlaybackState(readTechnical = true)
+
+            if (cached.isNotEmpty() && loudnessSessionPrefs.getBoolean(LOUDNESS_SESSION_ACTIVE, false)) {
+                android.util.Log.i(LOUDNESS_LOG_TAG, "restoring interrupted loudness-analysis session")
+                analyzeLoudnessForNormalization(resumeInterrupted = true)
+            }
         }
         connectController()
         viewModelScope.launch {
@@ -459,7 +465,9 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun analyzeLoudnessForNormalization() {
+    fun analyzeLoudnessForNormalization() = analyzeLoudnessForNormalization(resumeInterrupted = false)
+
+    private fun analyzeLoudnessForNormalization(resumeInterrupted: Boolean) {
         if (_uiState.value.loudnessAnalysisRunning) return
         val tracks = _uiState.value.tracks
         if (tracks.isEmpty()) return
@@ -485,6 +493,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
             val trustedTagSkipped = tracks.size - targets.size
 
             if (targets.isEmpty()) {
+                loudnessSessionPrefs.edit().putBoolean(LOUDNESS_SESSION_ACTIVE, false).apply()
                 _uiState.value = _uiState.value.copy(
                     loudnessAnalysisRunning = false,
                     loudnessAnalysisCompleted = 0,
@@ -495,30 +504,41 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
+            val analyzed = LinkedHashMap<Long, LoudnessRecord>()
+            targets.forEach { track ->
+                loudnessStore.get(track)?.let { analyzed[track.id] = it }
+            }
+
+            var completed = analyzed.size
+            var failed = 0
+            var reused = analyzed.size
+            var newlyAnalyzed = 0
+            val checkpoint = ArrayList<LoudnessRecord>(LOUDNESS_CHECKPOINT_TRACKS)
+
+            loudnessSessionPrefs.edit()
+                .putBoolean(LOUDNESS_SESSION_ACTIVE, true)
+                .putInt(LOUDNESS_SESSION_COMPLETED, completed)
+                .putInt(LOUDNESS_SESSION_TOTAL, targets.size)
+                .apply()
+
             _uiState.value = _uiState.value.copy(
                 loudnessAnalysisRunning = true,
-                loudnessAnalysisCompleted = 0,
+                loudnessAnalysisCompleted = completed,
                 loudnessAnalysisTotal = targets.size,
                 loudnessAnalysisFailed = 0,
-                loudnessAnalysisStatus = "Offline loudness analysis started · playback paused · $trustedTagSkipped fully tagged skipped"
+                loudnessAnalysisStatus = if (resumeInterrupted && completed > 0) {
+                    "Resumed loudness analysis · $completed/${targets.size} already saved · $trustedTagSkipped fully tagged skipped"
+                } else {
+                    "Offline loudness analysis started · $completed/${targets.size} cached · $trustedTagSkipped fully tagged skipped"
+                }
             )
-
-            var completed = 0
-            var failed = 0
-            var reused = 0
-            var newlyAnalyzed = 0
-            val analyzed = LinkedHashMap<Long, LoudnessRecord>()
-            val checkpoint = ArrayList<LoudnessRecord>(LOUDNESS_CHECKPOINT_TRACKS)
 
             withContext(Dispatchers.IO) {
                 for (track in targets) {
-                    val existing = loudnessStore.get(track)
-                    var timingText = "cached"
+                    if (analyzed.containsKey(track.id)) continue
+                    var timingText = "analyzing"
 
-                    if (existing != null) {
-                        analyzed[track.id] = existing
-                        reused++
-                    } else {
+                    runCatching { loudnessAnalyzer.analyze(track) }
                         runCatching { loudnessAnalyzer.analyze(track) }
                             .onSuccess { result ->
                                 val record = LoudnessRecord(
@@ -548,7 +568,6 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                                 CrashLogStore.nonFatal(getApplication(), "Loudness analysis: ${track.displayName}", error)
                                 android.util.Log.w(LOUDNESS_LOG_TAG, "analysis failed name=${track.displayName}", error)
                             }
-                    }
 
                     completed++
 
@@ -560,6 +579,12 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                         )
                         checkpoint.clear()
                     }
+
+                    loudnessSessionPrefs.edit()
+                        .putBoolean(LOUDNESS_SESSION_ACTIVE, true)
+                        .putInt(LOUDNESS_SESSION_COMPLETED, completed)
+                        .putInt(LOUDNESS_SESSION_TOTAL, targets.size)
+                        .apply()
 
                     _uiState.value = _uiState.value.copy(
                         loudnessAnalysisCompleted = completed,
@@ -607,6 +632,12 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                 repository.scan(fullRescan = false)
             }.getOrDefault(_uiState.value.tracks)
 
+            loudnessSessionPrefs.edit()
+                .putBoolean(LOUDNESS_SESSION_ACTIVE, false)
+                .putInt(LOUDNESS_SESSION_COMPLETED, completed)
+                .putInt(LOUDNESS_SESSION_TOTAL, targets.size)
+                .apply()
+
             _uiState.value = _uiState.value.copy(
                 tracks = refreshed,
                 loudnessAnalysisRunning = false,
@@ -622,6 +653,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearLoudnessAnalysis() {
         loudnessStore.clear()
+        loudnessSessionPrefs.edit().clear().apply()
         viewModelScope.launch {
             val refreshed = runCatching { repository.scan(fullRescan = false) }.getOrDefault(_uiState.value.tracks)
             _uiState.value = _uiState.value.copy(
@@ -816,6 +848,9 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val LOUDNESS_LOG_TAG = "MokaLoudness"
         const val LOUDNESS_CHECKPOINT_TRACKS = 8
+        const val LOUDNESS_SESSION_ACTIVE = "active"
+        const val LOUDNESS_SESSION_COMPLETED = "completed"
+        const val LOUDNESS_SESSION_TOTAL = "total"
     }
 
 }

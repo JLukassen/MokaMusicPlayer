@@ -4,7 +4,7 @@
 - Keep the validated playback, USB safety and real-time DSP architecture unchanged.
 - Add a direct RIFF/WAV PCM loudness-analysis path instead of sending uncompressed WAV through Android's `c2.android.raw.decoder`.
 - Remove the per-output-buffer `FloatArray` allocation in the MediaCodec loudness path; decoded PCM is accumulated directly from the codec `ByteBuffer`.
-- Checkpoint newly analyzed loudness records every 8 tracks so a process kill or interrupted scan resumes from saved work.
+- Checkpoint newly analyzed loudness records every 8 tracks and persist an active-session marker so reopening Moka reconstructs progress from cached tracks and automatically resumes from the first missing track.
 - Skip albums whose tracks already have complete trusted ReplayGain/R128 Track + Album gain metadata.
 - Preserve complete-album semantics: if an album is missing gain coverage, its full album is analyzed before calculating offline album gain.
 - Add per-track `MokaLoudness` timing logs with decoder path, elapsed analysis time and ×-realtime speed.
