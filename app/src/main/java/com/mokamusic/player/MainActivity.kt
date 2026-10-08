@@ -199,6 +199,7 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                     onToggleFavorite = viewModel::toggleFavorite,
                     networkLibrary = networkLibrary,
                     onPlayNetwork = viewModel::playNetworkQueue,
+                    onShuffleMixed = viewModel::shuffleDeviceAndNavidrome,
                     onNetworkSettings = { page = 4 },
                     localPermissionGranted = hasPermission,
                     onRequestLocalPermission = { launcher.launch(permission) }
@@ -303,6 +304,7 @@ private fun LibraryScreen(
     onToggleFavorite: (MusicTrack) -> Unit,
     networkLibrary: NetworkLibraryState,
     onPlayNetwork: (com.mokamusic.player.network.NetworkSong, List<com.mokamusic.player.network.NetworkSong>, Boolean) -> Unit,
+    onShuffleMixed: () -> Unit,
     onNetworkSettings: () -> Unit,
     localPermissionGranted: Boolean,
     onRequestLocalPermission: () -> Unit
@@ -348,6 +350,10 @@ private fun LibraryScreen(
                 onClick = { selectedCollection = null; onTabChange(4) },
                 label = { Text("Network · Navidrome") }
             )
+        }
+
+        if (tab != 4) {
+            NetworkMixedShuffleButton(networkLibrary, tracks.size, onShuffleMixed)
         }
 
         if (selected != null && tab != 4) {
@@ -491,7 +497,9 @@ private fun LibraryScreen(
             4 -> NetworkLibraryScreen(
                 state = networkLibrary,
                 onPlay = onPlayNetwork,
-                onOpenSettings = onNetworkSettings
+                onOpenSettings = onNetworkSettings,
+                deviceTrackCount = tracks.size,
+                onShuffleMixed = onShuffleMixed
             )
         }
     }
