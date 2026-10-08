@@ -252,7 +252,7 @@ internal class NetworkLibraryState(
                     streamCheckStatus = "No server tracks found to test."
                     return@launch
                 }
-                val result = withContext(Dispatchers.IO) { active.checkStream(song.id) }
+                val result = withContext(Dispatchers.IO) { active.checkStream(song.id, song.mimeType) }
                 if (client === active) {
                     streamCheckStatus = result.message +
                         if (result.playable) " Try playing a song in Moka."
