@@ -74,6 +74,14 @@ internal fun NetworkAccountSettings(state: NetworkLibraryState) {
                     style = MaterialTheme.typography.bodySmall
                 )
                 OutlinedButton(
+                    onClick = state::testStream,
+                    enabled = !state.streamCheckBusy,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (state.streamCheckBusy) "Testing audio…" else "Test Navidrome audio stream") }
+                state.streamCheckStatus?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall)
+                }
+                OutlinedButton(
                     onClick = state::disconnect,
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth()
