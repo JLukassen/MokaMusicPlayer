@@ -108,9 +108,17 @@ In Moka Beta 6.1 → Library → Network tab:
 - Username/password: Navidrome user created in Step 3.
 - Tap Connect → browse full-height albums → open an album → select a track for playback.
 - You can search loaded albums by name or artist, load additional album pages and refresh.
-- The connection remains active while switching between Library and Now Playing until
-  you disconnect or Moka's process is terminated. The HTTPS URL and username are
-  remembered; no password is stored to disk.
+- The connection is owned by the app's ViewModel; switching Library tabs, opening
+  Now Playing, or leaving the Network screen does not destroy the active session.
+- The URL and username are remembered while typing, even if you navigate away.
+  With **Remember login securely on this device** checked, the login password is
+  saved with Android Keystore AES-GCM in the no-backup files directory.
+  When you reopen Library → Network after an app restart, Moka attempts a
+  reconnect. You can also tap **Reconnect to saved server**.
+- **Disconnect** closes the active session but preserves the saved login.
+  **Forget server and saved login** clears stored URL, username and password.
+  Unchecking Remember login removes the stored password. If the device Keystore
+  becomes unavailable, enter your password again.
 - Network music is no longer confined to the Settings card; the Library's
   Tracks/Albums/Artists/Genres tabs remain local.
 
