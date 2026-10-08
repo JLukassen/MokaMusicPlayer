@@ -98,11 +98,14 @@ internal class CarLibraryCallback(context: Context) : MediaLibrarySession.Callba
     }
 
     private fun resolve(item: MediaItem, tracks: List<MusicTrack>): MediaItem {
-        if (item.localConfiguration != null) return item
-        val id = item.mediaId.removePrefix("track:").toLongOrNull() ?: return item
-        val track = tracks.firstOrNull { it.id == id } ?: return item
-        // Preserve the in-app numeric media ID so the existing ViewModel can identify it.
-        return playable(track).buildUpon().setMediaId(track.id.toString()).build()
+        // Car browse items already have URIs, but their 'track:' IDs must still be
+        // converted to numeric IDs so Moka's existing Now Playing and queue sync work.
+        if (item.mediaId.startsWith("track:")) {
+            val id = item.mediaId.removePrefix("track:").toLongOrNull() ?: return item
+            val track = tracks.firstOrNull { it.id == id } ?: return item
+            return playable(track).buildUpon().setMediaId(track.id.toString()).build()
+        }
+        return item
     }
 
     override fun onGetLibraryRoot(
