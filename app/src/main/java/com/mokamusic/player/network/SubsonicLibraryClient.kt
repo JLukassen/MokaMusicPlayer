@@ -19,7 +19,12 @@ data class NetworkSong(
  * Username and password stay in memory; nothing is written to preferences or logs.
  * Subsonic token/salt hashes are only passed to the caller-selected HTTPS server.
  */
-class SubsonicLibraryClient(server: String, private val user: String, private val password: String) {
+class SubsonicLibraryClient(
+    server: String,
+    private val user: String,
+    private val password: String,
+    private val connectionFactory: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection }
+) {
     private val root: String = validateServerUrl(server)
 
     fun ping() { request("ping") }
@@ -52,13 +57,16 @@ class SubsonicLibraryClient(server: String, private val user: String, private va
         }
     }
 
-    fun streamUri(id: String): Uri = Uri.parse(endpoint("stream", mapOf(
-        "id" to id, "format" to "raw"
-    )))
+    fun streamUri(id: String): Uri = Uri.parse(streamRequestUrl(id))
+
+    /** Builds a signed streaming endpoint; exposed for JVM tests without android.net.Uri. */
+    internal fun streamRequestUrl(id: String): String = endpoint(
+        "stream", mapOf("id" to id, "format" to "raw")
+    )
 
     private fun request(method: String, params: Map<String, String> = emptyMap()): JSONObject {
         val url = URL(endpoint(method, params))
-        val connection = (url.openConnection() as HttpURLConnection).apply {
+        val connection = connectionFactory(url).apply {
             connectTimeout = 8_000
             readTimeout = 15_000
             instanceFollowRedirects = false
