@@ -276,7 +276,7 @@ internal fun NetworkLibraryScreen(
     state: NetworkLibraryState,
     onPlay: (NetworkSong, Uri) -> Unit
 ) {
-    val scope = rememberCoroutineScope()
+    LaunchedEffect(state) { state.onScreenOpened() }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -322,18 +322,18 @@ internal fun NetworkLibraryScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    "Connect to your music server. The server address and username " +
-                        "are remembered; the password is not saved.",
+                    "Your server and username are remembered. You can save the password " +
+                        "securely on this device and reconnect automatically.",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 OutlinedTextField(
-                    value = state.server, onValueChange = { state.server = it },
+                    value = state.server, onValueChange = state::setServer,
                     label = { Text("Server HTTPS URL") },
                     placeholder = { Text("https://your-server.ts.net") },
                     singleLine = true, modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
-                    value = state.username, onValueChange = { state.username = it },
+                    value = state.username, onValueChange = state::setUsername,
                     label = { Text("Username") },
                     singleLine = true, modifier = Modifier.fillMaxWidth()
                 )
@@ -343,13 +343,37 @@ internal fun NetworkLibraryScreen(
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true, modifier = Modifier.fillMaxWidth()
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = state.rememberLogin,
+                        onCheckedChange = state::setRememberLogin
+                    )
+                    Text("Remember login securely on this device")
+                }
                 Button(
                     enabled = !state.busy && state.server.isNotBlank() &&
-                        state.username.isNotBlank() && state.password.isNotBlank(),
-                    onClick = { scope.launch { state.connect() } },
+                        state.username.isNotBlank() &&
+                        (state.password.isNotBlank() || state.savedLoginAvailable),
+                    onClick = state::connect,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(if (state.busy) "Connecting…" else "Connect to library")
+                    Text(
+                        when {
+                            state.busy -> "Connecting…"
+                            state.savedLoginAvailable && state.password.isBlank() ->
+                                "Reconnect to saved server"
+                            else -> "Connect to library"
+                        }
+                    )
+                }
+                if (state.savedLoginAvailable) {
+                    Text(
+                        "Saved password is protected by Android Keystore and excluded from backup.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                OutlinedButton(onClick = state::forgetServer) {
+                    Text("Forget server and saved login")
                 }
                 Text(
                     "Streaming is experimental. Offline downloads and DSP parity " +
@@ -408,7 +432,7 @@ internal fun NetworkLibraryScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 trailingIcon = {
                     TextButton(
-                        onClick = { scope.launch { state.refresh() } },
+                        onClick = state::refresh,
                         enabled = !state.busy
                     ) { Text("Refresh") }
                 }
@@ -424,7 +448,7 @@ internal fun NetworkLibraryScreen(
                 items(filtered, key = { it.id }) { album ->
                     ListItem(
                         modifier = Modifier.clickable(enabled = !state.busy) {
-                            scope.launch { state.openAlbum(album) }
+                            state.openAlbum(album)
                         },
                         headlineContent = {
                             Text(album.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -441,7 +465,7 @@ internal fun NetworkLibraryScreen(
                 if (state.hasMoreAlbums) {
                     item(key = "more") {
                         OutlinedButton(
-                            onClick = { scope.launch { state.loadMore() } },
+                            onClick = state::loadMore,
                             enabled = !state.busy,
                             modifier = Modifier.fillMaxWidth().padding(16.dp)
                         ) {
