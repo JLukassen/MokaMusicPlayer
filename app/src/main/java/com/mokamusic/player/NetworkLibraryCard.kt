@@ -73,6 +73,8 @@ internal class NetworkLibraryState(
         private set
     var trackBrowsingComplete by mutableStateOf(false)
         private set
+    var trackBatchFailed by mutableStateOf(false)
+        private set
     var searchedTracks by mutableStateOf<List<NetworkSong>>(emptyList())
         private set
     var activeTrackSearch by mutableStateOf("")
@@ -96,6 +98,8 @@ internal class NetworkLibraryState(
     var status by mutableStateOf<String?>(null)
         private set
     var hasMoreAlbums by mutableStateOf(false)
+        private set
+    var albumBatchFailed by mutableStateOf(false)
         private set
     private var nextAlbumOffset = 0
     private var autoReconnectAttempted = false
@@ -169,6 +173,8 @@ internal class NetworkLibraryState(
             browsedTracks = emptyList()
             trackAlbumCursor = 0
             trackBrowsingComplete = false
+            trackBatchFailed = false
+            albumBatchFailed = false
             searchedTracks = emptyList()
             activeTrackSearch = ""
             hasMoreSearch = false
@@ -219,6 +225,7 @@ internal class NetworkLibraryState(
             val first = withContext(Dispatchers.IO) { active.albums(0, PAGE_SIZE) }
             albums = first.distinctBy { it.id }
             hasMoreAlbums = first.size == PAGE_SIZE
+            albumBatchFailed = false
             nextAlbumOffset = first.size
             status = "Refreshed · ${albums.size} albums"
         } catch (e: Exception) {
@@ -237,6 +244,7 @@ internal class NetworkLibraryState(
         val active = client ?: return
         if (busy || !hasMoreAlbums) return
         busy = true
+        albumBatchFailed = false
         val offset = nextAlbumOffset
         status = "Loading more albums…"
         try {
@@ -247,8 +255,10 @@ internal class NetworkLibraryState(
             nextAlbumOffset += next.size
             hasMoreAlbums = next.size == PAGE_SIZE
             status = "${albums.size} albums loaded"
-        } catch (e: Exception) {
-            status = "Couldn't load more albums. Try again."
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (_: Exception) {
+            albumBatchFailed = true
+            status = "Couldn't load more albums. Tap to retry."
         } finally {
             busy = false
         }
@@ -365,6 +375,7 @@ internal class NetworkLibraryState(
         if (busy || trackBrowsingComplete) return
         appScope.launch {
             busy = true
+            trackBatchFailed = false
             status = "Loading tracks from the server…"
             try {
                 var catalog = albums
@@ -396,7 +407,10 @@ internal class NetworkLibraryState(
                 trackBrowsingComplete = cursor >= catalog.size && !more
                 status = if (browsedTracks.isEmpty()) "No server tracks found yet." else null
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (_: Exception) { status = "Couldn't load tracks. Retry this batch." }
+            catch (_: Exception) {
+                trackBatchFailed = true
+                status = "Couldn't load tracks. Tap to retry this batch."
+            }
             finally { busy = false }
         }
     }
@@ -474,6 +488,8 @@ internal class NetworkLibraryState(
         browsedTracks = emptyList()
         trackAlbumCursor = 0
         trackBrowsingComplete = false
+        trackBatchFailed = false
+        albumBatchFailed = false
         searchedTracks = emptyList()
         activeTrackSearch = ""
         hasMoreSearch = false
