@@ -74,17 +74,17 @@ internal class NetworkLibraryState(
             prefs.getString("saved_server_url", null) == server.trim().trimEnd('/') &&
             prefs.getString("saved_username", null) == username.trim()
 
-    fun setServer(value: String) {
+    fun updateServer(value: String) {
         server = value
         prefs.edit().putString("server_url", value).apply()
     }
 
-    fun setUsername(value: String) {
+    fun updateUsername(value: String) {
         username = value
         prefs.edit().putString("username", value).apply()
     }
 
-    fun setRememberLogin(value: Boolean) {
+    fun updateRememberLogin(value: Boolean) {
         rememberLogin = value
         prefs.edit().putBoolean("remember_login", value).apply()
         if (!value) clearSavedLogin()
@@ -131,8 +131,8 @@ internal class NetworkLibraryState(
             songs = emptyList()
             hasMoreAlbums = first.size == PAGE_SIZE
             nextAlbumOffset = first.size
-            setServer(target)
-            setUsername(account)
+            updateServer(target)
+            updateUsername(account)
             val saved = if (rememberLogin) {
                 runCatching {
                     withContext(Dispatchers.IO) {
@@ -327,13 +327,13 @@ internal fun NetworkLibraryScreen(
                     style = MaterialTheme.typography.bodyMedium
                 )
                 OutlinedTextField(
-                    value = state.server, onValueChange = state::setServer,
+                    value = state.server, onValueChange = state::updateServer,
                     label = { Text("Server HTTPS URL") },
                     placeholder = { Text("https://your-server.ts.net") },
                     singleLine = true, modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
-                    value = state.username, onValueChange = state::setUsername,
+                    value = state.username, onValueChange = state::updateUsername,
                     label = { Text("Username") },
                     singleLine = true, modifier = Modifier.fillMaxWidth()
                 )
@@ -346,7 +346,7 @@ internal fun NetworkLibraryScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(
                         checked = state.rememberLogin,
-                        onCheckedChange = state::setRememberLogin
+                        onCheckedChange = state::updateRememberLogin
                     )
                     Text("Remember login securely on this device")
                 }
