@@ -423,7 +423,8 @@ class DirectPcmEngine(
                 // DSP used to start AudioTrack empty, then read/process almost a full second of
                 // audio at once. The track could drain before the next batch was ready. Feed much
                 // smaller chunks and pre-roll one chunk before starting playback.
-                if (!floatPath) startTrackIfRequested(track)
+                // Do not start an empty AudioTrack; prime it with the first PCM chunk.
+                var integerOutputStarted = false
 
                 val ioFrames = if (floatPath) DSP_IO_FRAMES else max(4096, info.sampleRate / 2)
                 val ioBytes = max(frameSize, ioFrames * frameSize)
@@ -441,7 +442,7 @@ class DirectPcmEngine(
                         currentPositionMs = target
                         dsp?.reset()
                         dspWriter?.resetForSeek()
-                        if (!floatPath) startTrackIfRequested(track)
+                        if (!floatPath) integerOutputStarted = false
                     }
 
                     if (pauseRequested || !playRequested) {
@@ -484,6 +485,9 @@ class DirectPcmEngine(
                             val written = track.write(buffer, read - writtenTotal, AudioTrack.WRITE_BLOCKING)
                             if (written < 0) throw DirectUnsupported("AudioTrack write failed: $written")
                             writtenTotal += written
+                        }
+                        if (!integerOutputStarted && writtenTotal > 0) {
+                            integerOutputStarted = startTrackIfRequested(track)
                         }
                     }
                     bytesConsumed += read
@@ -593,6 +597,7 @@ class DirectPcmEngine(
         var actualChannels = sourceChannels
         var dsp: DspStreamAdapter? = null
         var floatPath = false
+        var integerOutputStarted = false
         var dspWriter: DspAudioWriter? = null
         var appliedDspRevision = dspSettingsRevision.get()
 
@@ -608,7 +613,7 @@ class DirectPcmEngine(
                 currentPositionMs = target
                 dsp?.reset()
                 dspWriter?.resetForSeek()
-                if (!floatPath) track?.let(::startTrackIfRequested)
+                if (!floatPath) integerOutputStarted = false
             }
 
             if (!inputEnded) {
@@ -672,7 +677,7 @@ class DirectPcmEngine(
                         if (floatPath) "Moka DSP · $codecName · 32-bit float" else "Moka Direct $codecName"
                     )
                     callback.onReady(durationMs)
-                    if (!floatPath) startTrackIfRequested(newTrack)
+                    integerOutputStarted = false
                 }
                 else -> if (outputIndex >= 0) {
                     val outputBuffer = codec.getOutputBuffer(outputIndex)
@@ -712,6 +717,9 @@ class DirectPcmEngine(
                             while (outputBuffer.hasRemaining() && !stopRequested && generation.get() == token) {
                                 val written = activeTrack.write(outputBuffer, outputBuffer.remaining(), AudioTrack.WRITE_BLOCKING)
                                 if (written < 0) throw DirectUnsupported("AudioTrack write failed: $written")
+                            }
+                            if (!integerOutputStarted) {
+                                integerOutputStarted = startTrackIfRequested(activeTrack)
                             }
                         }
                         currentPositionMs = info.presentationTimeUs.coerceAtLeast(0L) / 1000L
