@@ -314,7 +314,41 @@ private fun LibraryScreen(
     val genreGroups = remember(tracks) { tracks.groupBy { normalizedGenre(it) } }
 
     val selected = selectedCollection?.let(::decodeCollection)
-    if (selected != null) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text("Moka", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+                Text("${tracks.size} tracks · ${albumGroups.size} albums · ${artistGroups.size} artists · ${genreGroups.size} genres")
+            }
+            IconButton(onClick = onRescan, enabled = !isScanning && localPermissionGranted && tab != 4) {
+                if (isScanning) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                else Icon(Icons.Default.Refresh, "Refresh library", tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+
+        // Explicit music-source switch avoids burying Navidrome offscreen in the tab strip.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilterChip(
+                selected = tab != 4,
+                onClick = { selectedCollection = null; onTabChange(0) },
+                label = { Text("Device music") }
+            )
+            FilterChip(
+                selected = tab == 4,
+                onClick = { selectedCollection = null; onTabChange(4) },
+                label = { Text("Network · Navidrome") }
+            )
+        }
+
+        if (selected != null && tab != 4) {
         val collectionTracks = when (selected.type) {
             LibraryCollectionType.ALBUM -> albumGroups[selected.key].orEmpty()
             LibraryCollectionType.ARTIST -> artistGroups[selected.key].orEmpty()
@@ -333,28 +367,18 @@ private fun LibraryScreen(
             onAddToQueue = onAddToQueue,
             onToggleFavorite = onToggleFavorite
         )
-        return
+            return@Column
     }
 
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column {
-                Text("Moka", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-                Text("${tracks.size} tracks · ${albumGroups.size} albums · ${artistGroups.size} artists · ${genreGroups.size} genres")
-            }
-            IconButton(onClick = onRescan, enabled = !isScanning && localPermissionGranted && tab != 4) {
-                if (isScanning) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                else Icon(Icons.Default.Refresh, "Refresh library", tint = MaterialTheme.colorScheme.primary)
-            }
-        }
-
-        PrimaryScrollableTabRow(selectedTabIndex = tab, edgePadding = 0.dp) {
-            listOf("Tracks", "Albums", "Artists", "Genres", "Network").forEachIndexed { index, title ->
-                Tab(selected = tab == index, onClick = { onTabChange(index) }, text = { Text(title) })
+        if (tab != 4) {
+            PrimaryScrollableTabRow(selectedTabIndex = tab, edgePadding = 0.dp) {
+                listOf("Tracks", "Albums", "Artists", "Genres").forEachIndexed { index, title ->
+                    Tab(
+                        selected = tab == index,
+                        onClick = { selectedCollection = null; onTabChange(index) },
+                        text = { Text(title) }
+                    )
+                }
             }
         }
 
