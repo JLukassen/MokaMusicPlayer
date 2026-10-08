@@ -114,11 +114,12 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
     val context = LocalContext.current
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var page by rememberSaveable { mutableIntStateOf(0) }
+    // The selected library tab survives navigation away from Library.
+    var libraryTab by rememberSaveable { mutableIntStateOf(0) }
     var search by rememberSaveable { mutableStateOf("") }
     val uiPrefs = remember { context.getSharedPreferences("moka_ui", Context.MODE_PRIVATE) }
     var onboardingSeen by rememberSaveable { mutableStateOf(uiPrefs.getBoolean("onboarding_seen", false)) }
-    // Keep the remote library session while moving between Library, Now Playing, and DSP.
-    val networkLibrary = remember(context) { NetworkLibraryState(context.applicationContext) }
+    val networkLibrary = viewModel.networkLibrary
 
     LaunchedEffect(openNowPlayingRequest) {
         if (openNowPlayingRequest > 0) page = 0
@@ -178,6 +179,8 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                 !hasPermission && page != 1 -> PermissionScreen { launcher.launch(permission) }
                 page == 0 -> NowPlayingScreen(state, viewModel)
                 page == 1 -> LibraryScreen(
+                    selectedTab = libraryTab,
+                    onTabChange = { libraryTab = it },
                     tracks = state.tracks,
                     favoriteIds = state.favoriteIds,
                     isScanning = state.isScanning,
@@ -279,6 +282,8 @@ private data class LibraryCollection(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LibraryScreen(
+    selectedTab: Int,
+    onTabChange: (Int) -> Unit,
     tracks: List<MusicTrack>,
     favoriteIds: Set<Long>,
     isScanning: Boolean,
@@ -300,7 +305,7 @@ private fun LibraryScreen(
     localPermissionGranted: Boolean,
     onRequestLocalPermission: () -> Unit
 ) {
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    val tab = selectedTab
     var selectedCollection by rememberSaveable { mutableStateOf<String?>(null) }
     var trackMode by rememberSaveable { mutableIntStateOf(0) } // 0 all, 1 recent, 2 favorites
 
@@ -349,7 +354,7 @@ private fun LibraryScreen(
 
         PrimaryScrollableTabRow(selectedTabIndex = tab, edgePadding = 0.dp) {
             listOf("Tracks", "Albums", "Artists", "Genres", "Network").forEachIndexed { index, title ->
-                Tab(selected = tab == index, onClick = { tab = index }, text = { Text(title) })
+                Tab(selected = tab == index, onClick = { onTabChange(index) }, text = { Text(title) })
             }
         }
 
