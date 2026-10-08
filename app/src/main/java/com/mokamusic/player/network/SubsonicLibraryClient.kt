@@ -98,6 +98,19 @@ class SubsonicLibraryClient(
         }.distinctBy { it.name }
     }
 
+    /** A server-chosen sample of music for mixed device + Navidrome shuffle.
+     * This avoids crawling every album over a cellular/Tailscale connection.
+     * Subsonic getRandomSongs accepts up to 500 songs per request.
+     */
+    fun randomSongs(count: Int = 200): List<NetworkSong> {
+        val rows = request("getRandomSongs", mapOf(
+            "size" to count.coerceIn(1, 500).toString()
+        )).optJSONObject("randomSongs")?.optJSONArray("song") ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { i ->
+            rows.optJSONObject(i)?.let { parseSong(it) }
+        }.distinctBy { it.id }
+    }
+
     /** Server-side genre paging: never download an entire genre just to open it. */
     fun genreSongs(genre: String, offset: Int = 0, size: Int = 100): List<NetworkSong> {
         val rows = request("getSongsByGenre", mapOf(
