@@ -373,10 +373,12 @@ internal class NetworkLibraryState(
     fun loadTrackBatch() {
         val active = client ?: return
         if (busy || trackBrowsingComplete) return
+        // Set this before launching to prevent the scroll effect and Connect racing
+        // into two requests with the same album cursor.
+        busy = true
+        trackBatchFailed = false
+        status = "Loading tracks from the server…"
         appScope.launch {
-            busy = true
-            trackBatchFailed = false
-            status = "Loading tracks from the server…"
             try {
                 var catalog = albums
                 var offset = nextAlbumOffset
@@ -399,6 +401,7 @@ internal class NetworkLibraryState(
                     }
                     batch
                 }
+                if (client !== active) return@launch
                 albums = catalog
                 hasMoreAlbums = more
                 nextAlbumOffset = offset
