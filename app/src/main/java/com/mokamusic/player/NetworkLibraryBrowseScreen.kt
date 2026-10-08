@@ -9,6 +9,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -27,7 +28,9 @@ import com.mokamusic.player.network.NetworkGenre
 internal fun NetworkLibraryScreen(
     state: NetworkLibraryState,
     onPlay: (NetworkSong, List<NetworkSong>, Boolean) -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    deviceTrackCount: Int,
+    onShuffleMixed: () -> Unit
 ) {
     LaunchedEffect(state) { state.onScreenOpened() }
     var sortMode by remember { mutableStateOf("Name A-Z") }
@@ -66,6 +69,7 @@ internal fun NetworkLibraryScreen(
             Text(it, modifier = Modifier.padding(horizontal = 16.dp, vertical = 3.dp),
                 style = MaterialTheme.typography.bodySmall)
         }
+        NetworkMixedShuffleButton(state, deviceTrackCount, onShuffleMixed)
         PrimaryScrollableTabRow(selectedTabIndex = state.category, edgePadding = 0.dp) {
             listOf("Tracks", "Albums", "Artists", "Genres").forEachIndexed { index, label ->
                 Tab(selected = state.category == index, text = { Text(label) },
@@ -210,7 +214,12 @@ internal fun NetworkLibraryScreen(
                             ) { Text("More matching tracks") }
                         }
                     } else if (state.activeTrackSearch.isBlank() && !state.trackBrowsingComplete) {
-                        item {
+                        item(key = "next-track-batch") {
+                            LaunchedEffect(state.trackAlbumCursor, state.busy,
+                                state.trackBatchFailed, state.trackBrowsingComplete) {
+                                if (!state.busy && !state.trackBatchFailed &&
+                                    !state.trackBrowsingComplete) state.loadTrackBatch()
+                            }
                             OutlinedButton(
                                 enabled = !state.busy,
                                 onClick = state::loadTrackBatch,
@@ -232,7 +241,10 @@ internal fun NetworkLibraryScreen(
                         NetworkAlbumRow(album, state)
                     }
                     if (state.hasMoreAlbums) {
-                        item {
+                        item(key = "next-album-batch") {
+                            LaunchedEffect(state.albums.size, state.busy, state.albumBatchFailed) {
+                                if (!state.busy && !state.albumBatchFailed) state.loadMore()
+                            }
                             OutlinedButton(
                                 onClick = state::loadMore, enabled = !state.busy,
                                 modifier = Modifier.fillMaxWidth().padding(16.dp)
@@ -296,6 +308,37 @@ internal fun NetworkLibraryScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+/** Also shown from Device music, so users do not need to change sources first. */
+@Composable
+internal fun NetworkMixedShuffleButton(
+    state: NetworkLibraryState,
+    deviceTrackCount: Int,
+    onShuffleMixed: () -> Unit
+) {
+    if (state.client == null || deviceTrackCount == 0) return
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        FilledTonalButton(
+            onClick = onShuffleMixed,
+            enabled = !state.mixedShuffleBusy
+        ) {
+            if (state.mixedShuffleBusy) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            } else {
+                Icon(Icons.Default.Shuffle, contentDescription = null)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(if (state.mixedShuffleBusy) "Loading mixed shuffle…"
+                 else "Shuffle device + Navidrome")
+        }
+        state.mixedShuffleStatus?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
