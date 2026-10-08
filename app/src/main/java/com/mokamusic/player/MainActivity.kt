@@ -969,6 +969,14 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        state.networkPlaybackError?.let { error ->
+            Text(
+                error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+            )
+        }
         Spacer(Modifier.height(12.dp))
         Row(
             Modifier.fillMaxWidth(),
