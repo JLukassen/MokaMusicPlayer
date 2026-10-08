@@ -2,9 +2,11 @@
 
 **Moka Music Player** is a local-first high-fidelity Android music player built around transparent audio routing, source-rate-aware playback and a native real-time DSP engine.
 
-> **Current development build: 4.0.0-beta05 — Beta 5**
+> **Latest test release: [v4.0.0-beta05](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta05)** · Android versionCode **26** · debug-signed prerelease
 >
-> This build intentionally removes subscription streaming from the beta scope. Moka controls the local playback/DSP path instead of depending on a streaming provider's DRM, SDK or developer program.
+> **[Download the Beta 5 APK](https://github.com/JLukassen/MokaMusicPlayer/releases/download/v4.0.0-beta05/Moka-Music-Player-4.0.0-beta05-debug.apk)** · [SHA-256 checksums](https://github.com/JLukassen/MokaMusicPlayer/releases/download/v4.0.0-beta05/SHA256SUMS.txt) · [Full changelog](CHANGELOG.md) · [Previous Beta 4](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta04)
+>
+> Beta 5 is for device testing, **not a Play Store–signed production release**. Its GitHub Actions unit tests and debug APK build passed; Pixel 8a and Samsung hardware regression testing remains in progress. Moka intentionally does not offer subscription streaming in the beta: it controls local playback and DSP without relying on a streaming provider's DRM, SDK or developer program.
 
 ## Why Moka
 
@@ -34,6 +36,32 @@ Key features:
 - local audio files remain read-only
 - consistent Moka espresso/bronze Material 3 interface with technical diagnostics kept behind an Advanced view
 
+## What's new in Beta 5
+
+This update focuses on **Samsung library browsing, metadata extraction and artwork responsiveness**, while keeping the validated playback/DSP path and the Pixel 8a USB-volume safety guard unchanged.
+
+- **Fast cached-library startup:** already indexed music is restored without forcing a full metadata parse; MediaStore generation markers detect additions and changes.
+- **Fewer native metadata calls:** existing FLAC/WAV metadata is reused when title, artist, album and audio technical fields are already available.
+- **Faster WAV indexing:** a seekable RIFF parser skips large PCM data chunks instead of reading through them to reach later metadata.
+- **Less redundant artwork work:** cover lookups are limited to three concurrent requests; missing local artwork is remembered for up to 24 hours (optional online-cover misses for five minutes), with file-change invalidation.
+- **Better performance logs:** `MokaLibrary` reports slow files and scan completion; `MokaArtwork` reports slow artwork requests.
+- **All Beta 4 improvements retained:** Samsung FLAC loudness extraction fallback, bounded retry/failure handling, native C++ loudness processing and cache-write fixes.
+
+These are code-path improvements, not a guarantee of a particular load time on every device.
+
+### Install or upgrade the test APK
+
+Download the [Beta 5 debug APK](https://github.com/JLukassen/MokaMusicPlayer/releases/download/v4.0.0-beta05/Moka-Music-Player-4.0.0-beta05-debug.apk). For an ADB installation on a connected Android device:
+
+```bash
+adb devices -l
+adb -s DEVICE_SERIAL install -r Moka-Music-Player-4.0.0-beta05-debug.apk
+```
+
+The `-r` flag preserves the installed app's data **when Android accepts the update and the signing certificates match**. Android will reject an upgrade if the existing Moka APK was signed with a different key. **Do not uninstall just to work around a signature mismatch** unless you have safely backed up any settings and analysis data you need.
+
+The GitHub-hosted APK is debug-signed, so it may not share a certificate with a locally built APK or a future signed production APK. Keep [Beta 4](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta04) available as a comparison build; switching between builds also requires a compatible signing certificate.
+
 ---
 
 ## Hi-Fi playback philosophy
@@ -44,11 +72,11 @@ With DSP disabled, compatible local lossless content can use the direct PCM path
 
 With DSP enabled, Moka intentionally changes the samples and therefore does **not** call the result source bit-perfect.
 
-### USB routing and Pixel 8a safety in Beta 1
+### USB routing and Pixel 8a safety
 
 Moka retains its direct / exact-bit-perfect-capable USB path on devices where that route behaves correctly. Real-device testing found one important exception: on Pixel 8a, a DSP-off bit-perfect USB path could produce an unexpectedly high listening level.
 
-Beta 1 therefore applies a **targeted Pixel 8a USB guard**. While USB audio is routed on Pixel 8a, Moka keeps the user's saved DSP profile active and refuses the unsafe bit-perfect selection for that route. The saved DSP preference itself is not overwritten, and normal behavior returns when USB is disconnected. Other supported devices keep the direct USB behavior rather than being forced through a global safe-mixer fallback.
+Moka therefore retains a **targeted Pixel 8a USB guard** in subsequent betas. While USB audio is routed on Pixel 8a, Moka keeps the user's saved DSP profile active and refuses the unsafe bit-perfect selection for that route. The saved DSP preference itself is not overwritten, and normal behavior returns when USB is disconnected. Other supported devices keep the direct USB behavior rather than being forced through a global safe-mixer fallback.
 
 ```text
 Local file
@@ -122,8 +150,9 @@ Moka supports file-provided ReplayGain/R128 metadata and two listening modes:
 For local files without complete trusted loudness tags, Beta includes an optional offline scanner:
 
 - direct RIFF/WAV PCM analysis without the Android raw MediaCodec path
-- MediaCodec decoding for compressed formats
-- per-track checkpoint/resume caching
+- optimized native C++ BS.1770 accumulation, with a Kotlin fallback
+- MediaCodec and fallback extraction for supported compressed formats, including a Samsung FLAC retry path
+- per-track checkpoint/resume caching and persistent failure/retry records
 - fully tagged albums skipped automatically
 - per-track analysis timing in `MokaLoudness` logcat
 - K-weighting
@@ -182,14 +211,17 @@ Library views include:
 - Favorites
 - Unicode-aware search
 
-Artwork priority is local-first:
-
-1. embedded file artwork
-2. Android MediaStore thumbnail
-3. MediaMetadataRetriever fallback
-4. optional cached Cover Art Archive image after explicit MusicBrainz enrichment
+Artwork lookup is local-first. Depending on the file type and available embedded artwork, Moka uses FLAC picture metadata, Android MediaStore, a native metadata fallback, or optional cached Cover Art Archive imagery (only after explicit enrichment). It avoids redundant lookups when an earlier source succeeds; not every file type uses every fallback.
 
 Album views show cover art. Artist rows can build a 2×2 mosaic from up to four album covers.
+
+### Incremental library and artwork caches
+
+Moka stores a crash-safe on-device library index and normally **reuses unchanged songs** rather than reparsing all files. MediaStore updates trigger a debounced incremental refresh; a separate Full rescan action exists for intentional metadata rebuilds. The scan reports parsed/reused counts.
+
+The Beta 5 artwork loader bounds concurrent extraction, caches successful covers in memory, and temporarily remembers missing covers across restarts. Local misses expire after 24 hours; the optional online-art miss TTL is five minutes. A changed track fingerprint or enrichment URL causes a new lookup.
+
+Cached songs can appear before artwork finishes loading, allowing the library view to remain usable as cover images are obtained. Actual speed depends on storage, media provider and file tags.
 
 ---
 
@@ -265,41 +297,50 @@ Moka **does not yet claim seamless gapless handoff on the custom direct PCM/nati
 - targetSdk 36
 - minSdk 26
 - JDK 17
-- Android NDK
+- Android NDK 28.2.13676358 (as used by CI)
 - CMake 3.22.1
 - Media3 1.11.1
 
-Debug:
+Clone/update the repository and run unit tests plus a fresh debug build:
 
 ```bash
-./gradlew clean :app:assembleDebug
+git switch master
+git pull --ff-only origin master
+./gradlew clean :app:testDebugUnitTest :app:assembleDebug --no-build-cache
 ```
 
-Beta 1 USB validation after installing the RC:
+The locally built APK is at `app/build/outputs/apk/debug/app-debug.apk`. To install on a connected device **signed by the same debug key**:
+
+```bash
+adb devices -l
+adb -s DEVICE_SERIAL install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+A local debug APK can have a different signing key than the [published test APK](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta05); a mismatched update will be rejected. Do not discard app data solely to switch keys.
+
+To run the project-specific preflight checks:
+
+```bash
+./scripts/beta5-preflight.sh
+```
+
+GitHub Actions also runs the unit-test and debug-APK build before tagging and publishing a prerelease. See [Beta 5's CI workflow](.github/workflows/beta05-release.yml). A successful CI build **does not replace physical-device testing or Android instrumentation runs**.
+
+USB regression testing, particularly the Pixel 8a safety guard:
 
 ```bash
 ./scripts/beta1-usb-matrix.sh
 ```
 
-See `docs/BETA1_USB_TEST_MATRIX.md` for the two-phones × two-USB-devices test sequence and pass criteria.
+See [Beta 1 USB test matrix](docs/BETA1_USB_TEST_MATRIX.md) for the existing two-phone × two-USB-device test procedure and criteria.
 
-Release:
+A non-debug release compilation can be attempted with:
 
 ```bash
 ./gradlew clean :app:assembleRelease
 ```
 
-Tests:
-
-```bash
-./gradlew :app:testDebugUnitTest
-```
-
-If CMake/Ninja state becomes stale:
-
-```bash
-./fix-native-build.sh
-```
+Building a release variant does not by itself produce an app-store-signed production release. For stale CMake/Ninja state, use `./fix-native-build.sh`.
 
 ---
 
@@ -322,12 +363,31 @@ Moka can export diagnostics directly from **More**. The report includes:
 - cached MusicBrainz and loudness-analysis counts
 - last non-fatal playback error / crash record
 
-ADB debugging remains available:
+ADB debugging remains available. Replace `DEVICE_SERIAL` with the desired phone from `adb devices -l` (especially when Pixel and Samsung are both connected).
+
+For **library indexing, metadata and artwork**:
 
 ```bash
-adb logcat -c
-adb logcat -d | grep -iE \
-  "MokaAudio|MokaDSP|MokaNativeDSP|AudioTrack|AudioFlinger|underrun|BUFFER TIMEOUT" \
+adb -s DEVICE_SERIAL logcat -c
+# Open Moka, browse the library, or start an incremental refresh.
+adb -s DEVICE_SERIAL logcat -d -v threadtime \
+  | grep -E 'MokaLibrary|MokaArtwork|AndroidRuntime|FATAL EXCEPTION|ANR in' \
+  > moka-library.txt
+```
+
+`MokaLibrary` reports scan-complete total/parsed/reused/elapsed time and slow tag parses. `MokaArtwork` logs artwork requests taking at least 500 ms. Library entries and cover images do not necessarily finish loading at the same time.
+
+For **offline loudness performance**:
+
+```bash
+adb -s DEVICE_SERIAL logcat -d -s MokaLoudness:I '*:S' > moka-loudness.txt
+```
+
+For **playback, DSP and USB output**:
+
+```bash
+adb -s DEVICE_SERIAL logcat -d | grep -iE \
+  'MokaAudio|MokaDSP|MokaNativeDSP|AudioTrack|AudioFlinger|underrun|BUFFER TIMEOUT' \
   > moka-audio.txt
 ```
 
@@ -343,8 +403,16 @@ See `PRIVACY.md`.
 
 ---
 
-## Beta status
+## Beta status and known limitations
 
-`4.0.0-beta05` keeps the validated playback/DSP path frozen while accelerating Samsung artwork loading, RIFF/WAV metadata seeks, and incremental library scanning—especially for WAV/PCM libraries on Pixel-class devices. The implementation includes the planned local-library and hi-fi feature set, but mass-use confidence still requires the signed-build hardware/soak matrix in `BETA_CHECKLIST.md`.
+**v4.0.0-beta05 is a test prerelease**, not a stable or Play Store–signed release. Automated unit tests and debug assembly passed in GitHub Actions, but the new library/artwork changes still require Samsung and Pixel hardware verification.
 
-A Beta can have documented limitations; it should not have hidden behavior. Moka therefore reports what it can verify and explicitly labels estimated or unsupported paths.
+- **Loudness accuracy:** offline integrated LUFS uses a BS.1770-style analyzer, while the 4× inter-sample peak is an estimate, not a certified true-peak measurement.
+- **Interrupted background analysis:** per-track results and session state are persisted, but Android may pause or kill background processing; a dedicated durable foreground job is not yet implemented.
+- **Codec and channel coverage:** some unsupported multichannel layouts may be skipped, with failure details recorded for diagnosis.
+- **Direct-engine gapless:** seamless gapless handoff is not yet guaranteed for the custom native PCM/DSP path.
+- **USB audio safety:** the targeted Pixel 8a USB guard remains enabled. Test new routes with a conservative volume level.
+- **Release qualification:** physical-device playback, FLAC/WAV library browse/refresh, normalization, storage performance and long-running soak tests remain necessary. See [Beta checklist](BETA_CHECKLIST.md).
+- **Licensing audit:** transitive dependency notices and third-party DSP source provenance must be verified before a stable release. See [dependency license inventory](docs/release/DEPENDENCY_LICENSE_INVENTORY.md) and [DSP source provenance](docs/release/DSP_SOURCE_PROVENANCE.md).
+
+A beta can have documented limitations; Moka reports what it can verify and explicitly labels estimated or unsupported paths. See [changelog](CHANGELOG.md) for release-by-release changes and the [Beta 5 release](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta05) for the current APK.
