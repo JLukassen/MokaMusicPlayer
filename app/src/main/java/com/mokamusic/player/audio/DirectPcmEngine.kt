@@ -986,8 +986,12 @@ class DirectPcmEngine(
             parkedRouteId = -1
             old to previousRoute
         }
-        val knownOutputIds = runCatching {
-            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.id }.toSet()
+        val currentRouteIds = runCatching {
+            if (Build.VERSION.SDK_INT >= 33) {
+                audioManager.getAudioDevicesForAttributes(mediaAttributes).map { it.id }.toSet()
+            } else {
+                audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.id }.toSet()
+            }
         }.getOrDefault(emptySet())
         val canReuse = mixer == null &&
             parked.first != null &&
@@ -996,7 +1000,7 @@ class DirectPcmEngine(
             parked.first!!.format.channelCount == channels &&
             parked.first!!.format.encoding == encoding &&
             parked.first!!.playState != AudioTrack.PLAYSTATE_PLAYING &&
-            (parked.second < 0 || parked.second in knownOutputIds)
+            (parked.second < 0 || parked.second in currentRouteIds)
         val track = if (canReuse) {
             val reused = parked.first!!
             runCatching { reused.flush() }
@@ -1236,7 +1240,7 @@ class DirectPcmEngine(
         val track = audioTrack ?: return
         audioTrack = null
         // USB bit-perfect mixer state is route-specific; never carry it to another item.
-        if (activeUsbDevice != null) {
+        if (activeUsbDevice != null || runCatching { track.routedDevice?.type.isUsbAudio() }.getOrDefault(false)) {
             runCatching { track.release() }
             return
         }
