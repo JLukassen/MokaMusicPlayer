@@ -51,7 +51,7 @@ internal class NetworkLibraryState(
     var rememberLogin by mutableStateOf(prefs.getBoolean("remember_login", true))
         private set
     var search by mutableStateOf("")
-    var category by mutableIntStateOf(1) // 0 Tracks, 1 Albums, 2 Artists, 3 Genres
+    var category by mutableIntStateOf(0) // 0 Tracks, 1 Albums, 2 Artists, 3 Genres
         private set
     var artists by mutableStateOf<List<com.mokamusic.player.network.NetworkArtist>>(emptyList())
         private set
@@ -90,6 +90,9 @@ internal class NetworkLibraryState(
         private set
     var busy by mutableStateOf(false)
         private set
+    // Mixed shuffle is independent of the library browsing/paging spinner.
+    var mixedShuffleBusy by mutableStateOf(false)
+    var mixedShuffleStatus by mutableStateOf<String?>(null)
     var status by mutableStateOf<String?>(null)
         private set
     var hasMoreAlbums by mutableStateOf(false)
@@ -198,6 +201,8 @@ internal class NetworkLibraryState(
         } finally {
             busy = false
         }
+        // Populate Tracks on connect, without requiring a separate button press.
+        if (client != null && category == 0 && browsedTracks.isEmpty()) loadTrackBatch()
     }
 
     fun refresh() {
