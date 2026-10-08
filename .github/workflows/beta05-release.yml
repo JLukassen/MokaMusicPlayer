@@ -2,7 +2,7 @@ name: Beta 5 Android build and tagged APK
 
 on:
   push:
-    branches: [master, beta05-library-performance]
+    branches: [master, beta05-library-performance, beta06-autoeq-samsung]
   workflow_dispatch:
 
 permissions:

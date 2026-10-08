@@ -102,14 +102,14 @@ object AutoEqVdc {
         val values=when(f.type){
             "PK"->listOf(1+alpha*a,-2*cs,1-alpha*a,1+alpha/a,-2*cs,1-alpha/a)
             else->{
-                val s=sn/2*sqrt(2.0);val term=2*sqrt(a)*s
+                val term=2*sqrt(a)*alpha
                 if(f.type.startsWith("LS"))
                     listOf(a*((a+1)-(a-1)*cs+term),2*a*((a-1)-(a+1)*cs),a*((a+1)-(a-1)*cs-term),(a+1)+(a-1)*cs+term,-2*((a-1)+(a+1)*cs),(a+1)+(a-1)*cs-term)
                 else
                     listOf(a*((a+1)+(a-1)*cs+term),-2*a*((a-1)+(a+1)*cs),a*((a+1)+(a-1)*cs-term),(a+1)-(a-1)*cs+term,2*((a-1)-(a+1)*cs),(a+1)-(a-1)*cs-term)
             }
         }
-        val (b0,b1,b2,a0,a1,a2)=values
-        return listOf(b0/a0,b1/a0,b2/a0,-a1/a0,-a2/a0)
+        val a0=values[3]
+        return listOf(values[0]/a0,values[1]/a0,values[2]/a0,-values[4]/a0,-values[5]/a0)
     }
 }
