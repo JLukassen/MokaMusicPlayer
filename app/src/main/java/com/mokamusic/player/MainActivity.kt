@@ -1466,6 +1466,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
         item { MetadataDisplayPreferenceCard(state, viewModel) }
         item { MetadataEnrichmentCard(state, viewModel) }
         item { LoudnessAnalysisCard(state, viewModel) }
+        item { NetworkLibraryCard(viewModel::playNetworkTrack) }
 
         item { SectionLabel("ADVANCED") }
         item {

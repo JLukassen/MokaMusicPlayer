@@ -39,6 +39,7 @@ import com.mokamusic.player.data.AudioTechnicalMetadata
 import com.mokamusic.player.data.AudioTechnicalMetadataReader
 import com.mokamusic.player.data.LibraryScanProgress
 import com.mokamusic.player.data.MusicLibraryRepository
+import com.mokamusic.player.network.NetworkSong
 import com.mokamusic.player.data.ArtworkLoader
 import com.mokamusic.player.metadata.LibraryEnricher
 import com.mokamusic.player.metadata.MetadataNamePreference
@@ -126,6 +127,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private var mediaStoreRefreshJob: Job? = null
     private var lastProfileRoute: RouteClass? = null
     private var lastHeadphoneIdentity: String? = null
+    private var networkCurrentTrack: MusicTrack? = null
 
     private val mediaStoreObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean, uri: Uri?) { scheduleAutomaticLibraryRefresh() }
@@ -274,6 +276,21 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+    }
+
+    fun playNetworkTrack(song: NetworkSong, url: Uri) {
+        // A negative ID cannot collide with local MediaStore IDs. Playback remains in
+        // the existing Media3 session and bypasses the local-only direct PCM path.
+        val localId = -(song.id.hashCode().toLong() and 0x7fffffffL) - 1L
+        val remote = MusicTrack(
+            id = localId, uri = url,
+            displayName = song.title,
+            title = song.title, artist = song.artist, album = song.album,
+            albumId = -1L, durationMs = song.durationSeconds.coerceAtLeast(0) * 1000L,
+            mimeType = song.mimeType, sizeBytes = 0L, relativePath = null
+        )
+        networkCurrentTrack = remote
+        playFromQueue(remote, listOf(remote))
     }
 
     fun play(track: MusicTrack) {
@@ -820,11 +837,14 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private fun syncPlaybackState(readTechnical: Boolean = false) {
         val player = controller ?: return
         val currentId = player.currentMediaItem?.mediaId?.toLongOrNull()
-        val track = currentId?.let { id -> _uiState.value.tracks.firstOrNull { it.id == id } }
-            ?: _uiState.value.currentTrack?.takeIf { it.id == currentId }
+        val track = currentId?.let { id ->
+            _uiState.value.tracks.firstOrNull { it.id == id }
+                ?: networkCurrentTrack?.takeIf { it.id == id }
+        } ?: _uiState.value.currentTrack?.takeIf { it.id == currentId }
 
         val changedTrack = track?.id != _uiState.value.currentTrack?.id
-        val trackById = _uiState.value.tracks.associateBy { it.id }
+        val trackById = _uiState.value.tracks.associateBy { it.id } +
+            listOfNotNull(networkCurrentTrack).associateBy { it.id }
         val queue = buildList {
             for (i in 0 until player.mediaItemCount) {
                 val id = player.getMediaItemAt(i).mediaId.toLongOrNull() ?: continue
