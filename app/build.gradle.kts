@@ -88,5 +88,7 @@ dependencies {
     implementation("androidx.media3:media3-inspector:1.11.1")
     implementation("com.google.guava:guava:33.7.2-android")
     testImplementation("junit:junit:4.13.2")
+    // Android's org.json stubs throw on the local JVM; use the real JSON parser in tests.
+    testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
 }
