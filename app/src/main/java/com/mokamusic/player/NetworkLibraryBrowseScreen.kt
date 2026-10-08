@@ -73,6 +73,11 @@ internal fun NetworkLibraryScreen(
             Text(it, modifier = Modifier.padding(horizontal = 16.dp, vertical = 3.dp),
                 style = MaterialTheme.typography.bodySmall)
         }
+        state.playbackStatus?.let {
+            Text(it, modifier = Modifier.padding(horizontal = 16.dp, vertical = 3.dp),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall)
+        }
         NetworkMixedShuffleButton(state, deviceTrackCount, onShuffleMixed)
         PrimaryScrollableTabRow(selectedTabIndex = state.category, edgePadding = 0.dp) {
             listOf("Tracks", "Albums", "Artists", "Genres").forEachIndexed { index, label ->
