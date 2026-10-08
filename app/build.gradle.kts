@@ -15,7 +15,7 @@ val keystoreProperties = Properties().apply {
 
 android {
     namespace = "com.mokamusic.player"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.mokamusic.player"
