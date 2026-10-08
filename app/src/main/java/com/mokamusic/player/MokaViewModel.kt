@@ -320,6 +320,59 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         playFromQueue(selected, queue, shuffle)
     }
 
+    /** One Media3 playlist can alternate local files and Navidrome streams.
+     * Fetch a bounded random sample from the server rather than walking every album.
+     * Local files stay local; network URLs are generated only for selected songs.
+     */
+    fun shuffleDeviceAndNavidrome() {
+        val library = networkLibrary
+        val client = library.client ?: run {
+            library.mixedShuffleStatus = "Connect Navidrome in Settings first."
+            return
+        }
+        val localTracks = _uiState.value.tracks
+        if (localTracks.isEmpty()) {
+            library.mixedShuffleStatus = "No device tracks loaded. Scan your device library first."
+            return
+        }
+        if (library.mixedShuffleBusy) return
+        viewModelScope.launch {
+            library.mixedShuffleBusy = true
+            library.mixedShuffleStatus = "Choosing music from Navidrome…"
+            try {
+                // Balanced when possible; Subsonic caps random songs at 500.
+                val remoteSongs = withContext(Dispatchers.IO) {
+                    client.randomSongs(localTracks.size.coerceIn(1, 500))
+                }
+                if (library.client !== client) {
+                    library.mixedShuffleStatus = "Navidrome account changed. Try again."
+                    return@launch
+                }
+                if (remoteSongs.isEmpty()) {
+                    library.mixedShuffleStatus = "Navidrome returned no songs; mixed shuffle wasn't started."
+                    return@launch
+                }
+                val remoteTracks = remoteSongs.map { networkMusicTrack(it, client.streamUri(it.id)) }
+                    .distinctBy { it.id }
+                val mixedQueue = (localTracks + remoteTracks).distinctBy { it.id }
+                networkQueueTracks.clear()
+                remoteTracks.forEach { networkQueueTracks[it.id] = it }
+                networkCurrentTrack = remoteTracks.firstOrNull()
+                playQueue(mixedQueue, shuffle = true)
+                library.mixedShuffleStatus =
+                    "Shuffling ${localTracks.size} device + ${remoteTracks.size} Navidrome tracks."
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Exception text might contain a signed Subsonic URL. Never display or log it.
+                library.mixedShuffleStatus =
+                    "Couldn't load Navidrome songs. Check Tailscale or your server connection."
+            } finally {
+                library.mixedShuffleBusy = false
+            }
+        }
+    }
+
     fun play(track: MusicTrack) {
         playFromQueue(track, _uiState.value.tracks.ifEmpty { listOf(track) })
     }
