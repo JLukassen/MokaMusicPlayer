@@ -16,13 +16,15 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
-import androidx.media3.session.MediaSessionService
+import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import com.mokamusic.player.MainActivity
 import com.mokamusic.player.audio.AudioPathMonitor
 import com.mokamusic.player.audio.MokaAudioOutputProvider
 
-class PlaybackService : MediaSessionService() {
-    private var mediaSession: MediaSession? = null
+class PlaybackService : MediaLibraryService() {
+    private var mediaSession: MediaLibrarySession? = null
+    private var browserCallback: CarLibraryCallback? = null
     private var hybridPlayer: HiFiHybridPlayer? = null
 
     private val noisyReceiver = object : BroadcastReceiver() {
@@ -89,7 +91,8 @@ class PlaybackService : MediaSessionService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        mediaSession = MediaSession.Builder(this, player)
+        browserCallback = CarLibraryCallback(this)
+        mediaSession = MediaLibrarySession.Builder(this, player, browserCallback!!)
             .setSessionActivity(sessionActivity)
             .build()
 
@@ -111,6 +114,8 @@ class PlaybackService : MediaSessionService() {
             release()
         }
         hybridPlayer = null
+        browserCallback?.close()
+        browserCallback = null
         AudioPathMonitor.clearAll()
         mediaSession = null
         super.onDestroy()
