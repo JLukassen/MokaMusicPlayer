@@ -308,7 +308,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         selectedSong: NetworkSong, songs: List<NetworkSong>, shuffle: Boolean = false
     ) {
         val client = networkLibrary.client ?: return
-        val entries = (songs + selectedSong).distinctBy { it.id }
+        val entries = com.mokamusic.player.network.NetworkQueuePlan.build(selectedSong, songs)
         if (entries.isEmpty()) return
         val queue = entries.map { networkMusicTrack(it, client.streamUri(it.id)) }
             .distinctBy { it.id }
