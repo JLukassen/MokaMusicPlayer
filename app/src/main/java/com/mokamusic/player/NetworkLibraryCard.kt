@@ -236,6 +236,7 @@ internal class NetworkLibraryState(
         busy = true
         status = "Refreshing Navidrome library…"
         appScope.launch {
+            var refreshed = false
             try {
                 val first = withContext(Dispatchers.IO) { active.albums(0, PAGE_SIZE) }
                 if (client !== active) return@launch
@@ -260,12 +261,13 @@ internal class NetworkLibraryState(
                 genres = emptyList()
                 status = if (first.isEmpty()) "Connected, but no albums were returned."
                          else "Refreshed · ${albums.size} albums"
+                refreshed = true
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
             catch (e: Exception) { status = "Refresh failed: ${failureHint(e)}" }
             finally {
                 busy = false
             }
-            if (client === active && category == 0 && !trackBrowsingComplete) {
+            if (refreshed && client === active && category == 0 && !trackBrowsingComplete) {
                 loadTrackBatch()
             }
         }
