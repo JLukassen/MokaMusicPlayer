@@ -153,14 +153,21 @@ class DirectPcmEngine(
             prefetchExecutor.execute {
                 var prepared: WarmSource? = null
                 try {
-                    val label = item.mediaMetadata.extras
+                    val label = item?.mediaMetadata?.extras
                         ?.getString(AudioPathMonitor.EXTRA_FORMAT_LABEL).orEmpty()
                     val isWav = label.equals("WAV", true) ||
                         uri.lastPathSegment.orEmpty().lowercase().let { it.endsWith(".wav") || it.endsWith(".wave") }
                     prepared = if (isWav) {
                         appContext.contentResolver.openFileDescriptor(uri, "r")?.let { WarmWav(uri, it) }
                     } else {
-                        WarmDecoded(uri, MediaExtractor().also { it.setDataSource(appContext, uri, null) })
+                        WarmDecoded(uri, MediaExtractor().also { extractor ->
+                            try {
+                                extractor.setDataSource(appContext, uri, null)
+                            } catch (t: Exception) {
+                                extractor.release()
+                                throw t
+                            }
+                        })
                     }
                     synchronized(prefetchLock) {
                         if (prefetchVersion.get() == ticket) {
