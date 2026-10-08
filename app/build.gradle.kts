@@ -21,8 +21,8 @@ android {
         applicationId = "com.mokamusic.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 24
-        versionName = "4.0.0-beta03"
+        versionCode = 25
+        versionName = "4.0.0-beta04"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -85,6 +85,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-session:1.11.1")
     implementation("androidx.media3:media3-common:1.11.1")
+    implementation("androidx.media3:media3-inspector:1.11.1")
     implementation("com.google.guava:guava:33.7.2-android")
     testImplementation("junit:junit:4.13.2")
 }

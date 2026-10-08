@@ -1414,7 +1414,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 )
                 Spacer(Modifier.width(16.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Moka 4.0 Beta 3", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                    Text("Moka 4.0 Beta 4", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                     Text("v$versionName · Local-first hi-fi", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                     Text("Music first. DSP when you want it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -1504,7 +1504,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "Beta 3 keeps the validated playback/DSP engine frozen while hardening offline loudness analysis with direct WAV PCM, resumable checkpoints, restored progress after relaunch and per-track performance diagnostics.",
+                        "Beta 4 retains the validated playback/DSP engine while adding Samsung FLAC fallback extraction, explicit unsupported-format errors, persistent failure backoff and safer loudness cache writes.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

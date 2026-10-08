@@ -108,6 +108,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private val onlineMetadataStore = OnlineMetadataStore(application)
     private val metadataNamePreferenceStore = MetadataNamePreferenceStore(application)
     private val loudnessStore = LoudnessAnalysisStore(application)
+    private val loudnessFailureStore = com.mokamusic.player.audio.LoudnessFailureStore(application)
     private val loudnessAnalyzer = Bs1770LoudnessAnalyzer(application)
     private val loudnessSessionPrefs = application.getSharedPreferences("moka_loudness_session", android.content.Context.MODE_PRIVATE)
 
@@ -509,8 +510,11 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                 loudnessStore.get(track)?.let { analyzed[track.id] = it }
             }
 
-            var completed = analyzed.size
-            var failed = 0
+            val previouslyFailed = targets.count { track ->
+                !analyzed.containsKey(track.id) && loudnessFailureStore.skipped(track) != null
+            }
+            var completed = analyzed.size + previouslyFailed
+            var failed = previouslyFailed
             var reused = analyzed.size
             var newlyAnalyzed = 0
             val checkpoint = ArrayList<LoudnessRecord>(LOUDNESS_CHECKPOINT_TRACKS)
@@ -536,6 +540,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.IO) {
                 for (track in targets) {
                     if (analyzed.containsKey(track.id)) continue
+                    if (loudnessFailureStore.skipped(track) != null) continue
                     var timingText = "analyzing"
 
                     runCatching { loudnessAnalyzer.analyze(track) }
@@ -548,6 +553,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                                     trackGainDb = result.trackGainDb
                                 )
                                 analyzed[track.id] = record
+                                runCatching { loudnessFailureStore.remove(track) }
                                 checkpoint += record
                                 newlyAnalyzed++
                                 val speed = if (result.analysisTimeMs > 0 && track.durationMs > 0) {
@@ -563,7 +569,12 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                             }
                             .onFailure { error ->
                                 failed++
-                                timingText = "failed · ${error.javaClass.simpleName}"
+                                val failedRecord = runCatching {
+                                    loudnessFailureStore.recordFailure(track, error)
+                                }.onFailure { ioError ->
+                                    android.util.Log.e(LOUDNESS_LOG_TAG, "Failed to checkpoint analysis error", ioError)
+                                }.getOrNull()
+                                timingText = "failed · ${failedRecord?.reasonCode ?: error.javaClass.simpleName}"
                                 CrashLogStore.nonFatal(getApplication(), "Loudness analysis: ${track.displayName}", error)
                                 android.util.Log.w(LOUDNESS_LOG_TAG, "analysis failed name=${track.displayName}", error)
                             }
@@ -652,6 +663,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearLoudnessAnalysis() {
         loudnessStore.clear()
+        loudnessFailureStore.clear()
         loudnessSessionPrefs.edit().clear().apply()
         viewModelScope.launch {
             val refreshed = runCatching { repository.scan(fullRescan = false) }.getOrDefault(_uiState.value.tracks)
@@ -718,6 +730,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("Library enrichment")
             appendLine("MusicBrainz album matches cached: ${onlineMetadataStore.count()}")
             appendLine("Offline loudness records cached: ${loudnessStore.count()}")
+            appendLine("Offline loudness failures cached: ${loudnessFailureStore.count()}")
             CrashLogStore.lastError(app)?.let {
                 appendLine()
                 appendLine("Last non-fatal error")

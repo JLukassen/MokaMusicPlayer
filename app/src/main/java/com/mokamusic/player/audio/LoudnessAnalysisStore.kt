@@ -5,7 +5,6 @@ import android.util.AtomicFile
 import com.mokamusic.player.model.MusicTrack
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.OutputStreamWriter
 
 data class LoudnessRecord(
     val trackId: Long,
@@ -90,7 +89,8 @@ class LoudnessAnalysisStore(context: Context) {
         })
         val out = file.startWrite()
         try {
-            OutputStreamWriter(out, Charsets.UTF_8).use { it.write(root.toString()) }
+            // AtomicFile must own the output stream until finishWrite() syncs and closes it.
+            out.write(root.toString().toByteArray(Charsets.UTF_8))
             file.finishWrite(out)
         } catch (t: Throwable) {
             runCatching { file.failWrite(out) }
