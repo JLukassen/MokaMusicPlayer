@@ -3,6 +3,8 @@ name: Beta 6 release candidate verification
 on:
   push:
     branches: [beta061-network-duplicate-safety]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
