@@ -198,7 +198,7 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                     onAddToQueue = viewModel::addToQueue,
                     onToggleFavorite = viewModel::toggleFavorite,
                     networkLibrary = networkLibrary,
-                    onPlayNetwork = viewModel::playNetworkTrack,
+                    onPlayNetwork = viewModel::playNetworkQueue,
                     onNetworkSettings = { page = 4 },
                     localPermissionGranted = hasPermission,
                     onRequestLocalPermission = { launcher.launch(permission) }
@@ -302,7 +302,7 @@ private fun LibraryScreen(
     onAddToQueue: (MusicTrack) -> Unit,
     onToggleFavorite: (MusicTrack) -> Unit,
     networkLibrary: NetworkLibraryState,
-    onPlayNetwork: (com.mokamusic.player.network.NetworkSong, android.net.Uri) -> Unit,
+    onPlayNetwork: (com.mokamusic.player.network.NetworkSong, List<com.mokamusic.player.network.NetworkSong>, Boolean) -> Unit,
     onNetworkSettings: () -> Unit,
     localPermissionGranted: Boolean,
     onRequestLocalPermission: () -> Unit
