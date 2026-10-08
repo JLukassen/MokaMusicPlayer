@@ -131,6 +131,8 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private var lastProfileRoute: RouteClass? = null
     private var lastHeadphoneIdentity: String? = null
     private var networkCurrentTrack: MusicTrack? = null
+    // Retain every streamed track in Media3's remote queue for next/previous and UI metadata.
+    private val networkQueueTracks = mutableMapOf<Long, MusicTrack>()
 
     private val mediaStoreObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean, uri: Uri?) { scheduleAutomaticLibraryRefresh() }
@@ -197,12 +199,13 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.value = _uiState.value.copy(controllerReady = true)
                     syncPlaybackState(readTechnical = true)
                     pendingTrackId?.let { id ->
-                        val allTracks = _uiState.value.tracks
+                        val allTracks = _uiState.value.tracks + networkQueueTracks.values
+                        val byId = allTracks.associateBy { it.id }
                         val queue = pendingQueueIds
-                            ?.mapNotNull { queueId -> allTracks.firstOrNull { it.id == queueId } }
+                            ?.mapNotNull(byId::get)
                             ?.takeIf { it.isNotEmpty() }
                             ?: allTracks
-                        allTracks.firstOrNull { it.id == id }?.let { track ->
+                        byId[id]?.let { track ->
                             playFromQueue(track, queue, pendingShuffle)
                         }
                     }
@@ -281,19 +284,40 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun playNetworkTrack(song: NetworkSong, url: Uri) {
-        // A negative ID cannot collide with local MediaStore IDs. Playback remains in
-        // the existing Media3 session and bypasses the local-only direct PCM path.
-        val localId = -(song.id.hashCode().toLong() and 0x7fffffffL) - 1L
-        val remote = MusicTrack(
-            id = localId, uri = url,
-            displayName = song.title,
+    private fun networkMusicTrack(song: NetworkSong, url: Uri): MusicTrack {
+        // Keep remote IDs in the negative range to avoid colliding with MediaStore IDs.
+        val remoteId = -(song.id.hashCode().toLong() and 0x7fffffffL) - 1L
+        return MusicTrack(
+            id = remoteId, uri = url, displayName = song.title,
             title = song.title, artist = song.artist, album = song.album,
             albumId = -1L, durationMs = song.durationSeconds.coerceAtLeast(0) * 1000L,
             mimeType = song.mimeType, sizeBytes = 0L, relativePath = null
         )
-        networkCurrentTrack = remote
-        playFromQueue(remote, listOf(remote))
+    }
+
+    fun playNetworkTrack(song: NetworkSong, url: Uri) {
+        val track = networkMusicTrack(song, url)
+        networkQueueTracks.clear()
+        networkQueueTracks[track.id] = track
+        networkCurrentTrack = track
+        playFromQueue(track, listOf(track))
+    }
+
+    /** A complete Media3 queue allows automatic next track, previous, and shuffle. */
+    fun playNetworkQueue(
+        selectedSong: NetworkSong, songs: List<NetworkSong>, shuffle: Boolean = false
+    ) {
+        val client = networkLibrary.client ?: return
+        val entries = (songs + selectedSong).distinctBy { it.id }
+        if (entries.isEmpty()) return
+        val queue = entries.map { networkMusicTrack(it, client.streamUri(it.id)) }
+            .distinctBy { it.id }
+        val selectedId = -(selectedSong.id.hashCode().toLong() and 0x7fffffffL) - 1L
+        val selected = queue.firstOrNull { it.id == selectedId } ?: return
+        networkQueueTracks.clear()
+        queue.forEach { networkQueueTracks[it.id] = it }
+        networkCurrentTrack = selected
+        playFromQueue(selected, queue, shuffle)
     }
 
     fun play(track: MusicTrack) {
@@ -842,12 +866,13 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         val currentId = player.currentMediaItem?.mediaId?.toLongOrNull()
         val track = currentId?.let { id ->
             _uiState.value.tracks.firstOrNull { it.id == id }
+                ?: networkQueueTracks[id]
                 ?: networkCurrentTrack?.takeIf { it.id == id }
         } ?: _uiState.value.currentTrack?.takeIf { it.id == currentId }
 
         val changedTrack = track?.id != _uiState.value.currentTrack?.id
         val trackById = _uiState.value.tracks.associateBy { it.id } +
-            listOfNotNull(networkCurrentTrack).associateBy { it.id }
+            networkQueueTracks + listOfNotNull(networkCurrentTrack).associateBy { it.id }
         val queue = buildList {
             for (i in 0 until player.mediaItemCount) {
                 val id = player.getMediaItemAt(i).mediaId.toLongOrNull() ?: continue
