@@ -339,11 +339,24 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         pendingShuffle = false
 
         val index = cleanQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
-        val items = cleanQueue.map(::toMediaItem)
 
+        // Tapping another song within the same library/album should not replace the entire
+        // Media3 queue. Replacing it tears down the direct PCM/DSP path and loses a warm
+        // next-track source even when the user only wants to seek to another queue item.
+        val existingQueueMatches = mediaController.mediaItemCount == cleanQueue.size &&
+            cleanQueue.indices.all { i ->
+                val current = mediaController.getMediaItemAt(i)
+                current.mediaId == cleanQueue[i].id.toString() &&
+                    current.localConfiguration?.uri == cleanQueue[i].uri
+            }
         mediaController.shuffleModeEnabled = shuffle
-        mediaController.setMediaItems(items, index, 0L)
-        mediaController.prepare()
+        if (existingQueueMatches) {
+            mediaController.seekTo(index, 0L)
+            if (mediaController.playbackState == Player.STATE_IDLE) mediaController.prepare()
+        } else {
+            mediaController.setMediaItems(cleanQueue.map(::toMediaItem), index, 0L)
+            mediaController.prepare()
+        }
         mediaController.play()
         syncPlaybackState(readTechnical = true)
     }
