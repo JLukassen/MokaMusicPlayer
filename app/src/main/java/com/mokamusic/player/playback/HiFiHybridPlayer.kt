@@ -60,6 +60,10 @@ class HiFiHybridPlayer(
 
     private val fallbackListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
+            if (!directActive && playbackState == Player.STATE_ENDED) {
+                desiredPlayWhenReady = false
+                focus.abandon()
+            }
             if (!directActive && playbackState == Player.STATE_READY) {
                 transition.ready("media3")
                 if (fallback.isPlaying) transition.audible("media3-ready")
@@ -195,6 +199,9 @@ class HiFiHybridPlayer(
         val targetIndex = mediaItemIndex.takeIf { it != C.INDEX_UNSET } ?: currentIndex
         val targetPosition = positionMs.coerceAtLeast(0L)
 
+        if (targetIndex != currentIndex && targetIndex in 0 until fallback.mediaItemCount) {
+            transition.begin("manual-seek", fallback.getMediaItemAt(targetIndex).mediaId)
+        }
         if (directActive && targetIndex == currentIndex) {
             direct.seekTo(targetPosition)
             directPositionMs = targetPosition
@@ -275,9 +282,11 @@ class HiFiHybridPlayer(
         mainHandler.post {
             if (!directActive) return@post
             if (fallback.repeatMode == Player.REPEAT_MODE_ONE) {
-                direct.seekTo(0L)
-                if (desiredPlayWhenReady) direct.play()
-                invalidateState()
+                val repeating = fallback.currentMediaItem
+                if (repeating != null) {
+                    transition.begin("repeat-one", repeating.mediaId)
+                    activateDirect(repeating, 0L, desiredPlayWhenReady)
+                }
                 return@post
             }
 
