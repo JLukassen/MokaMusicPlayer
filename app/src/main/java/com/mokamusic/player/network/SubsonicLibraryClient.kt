@@ -147,18 +147,34 @@ class SubsonicLibraryClient(
         fallbackArtist: String = "Unknown artist"
     ): NetworkSong? {
         val id = item.optString("id").takeIf(String::isNotBlank) ?: return null
+        // Some Subsonic servers omit contentType on the song index, but send suffix.
+        val mime = item.optString("contentType").takeIf(String::isNotBlank)
+            ?: item.optString("suffix").takeIf { it.equals("wma", ignoreCase = true) }
+                ?.let { "audio/x-ms-wma" }
         return NetworkSong(id, item.optString("title", "Unknown track"),
             item.optString("artist", fallbackArtist),
             item.optString("album", fallbackAlbum), item.optInt("duration", 0),
-            item.optString("contentType").takeIf(String::isNotBlank),
-            item.optString("genre"))
+            mime, item.optString("genre"))
     }
 
-    fun streamUri(id: String): Uri = Uri.parse(streamRequestUrl(id))
+    // WMA/ASF cannot be extracted directly by Android Media3. Request an MP3 stream
+    // only for these tracks; preserve bit-perfect raw access for playable WAV/FLAC/etc.
+    internal fun needsMp3Transcode(sourceMimeType: String?): Boolean =
+        sourceMimeType?.let {
+            it.contains("wma", ignoreCase = true) ||
+                it.contains("ms-asf", ignoreCase = true)
+        } == true
+
+    fun playbackMimeType(sourceMimeType: String?): String? =
+        if (needsMp3Transcode(sourceMimeType)) "audio/mpeg" else sourceMimeType
+
+    fun streamUri(id: String, sourceMimeType: String? = null): Uri =
+        Uri.parse(streamRequestUrl(id, sourceMimeType))
 
     /** Builds a signed streaming endpoint; exposed for JVM tests without android.net.Uri. */
-    internal fun streamRequestUrl(id: String): String = endpoint(
-        "stream", mapOf("id" to id, "format" to "raw")
+    internal fun streamRequestUrl(id: String, sourceMimeType: String? = null): String = endpoint(
+        "stream", mapOf("id" to id, "format" to
+            if (needsMp3Transcode(sourceMimeType)) "mp3" else "raw")
     )
 
     /**
@@ -167,8 +183,8 @@ class SubsonicLibraryClient(
      * underlying file. Read only a small range; never download an entire song here.
      * The signed URL is kept private and must never be logged.
      */
-    fun checkStream(songId: String): StreamProbeResult {
-        val connection = connectionFactory(URL(streamRequestUrl(songId))).apply {
+    fun checkStream(songId: String, sourceMimeType: String? = null): StreamProbeResult {
+        val connection = connectionFactory(URL(streamRequestUrl(songId, sourceMimeType))).apply {
             connectTimeout = 15_000
             readTimeout = 25_000
             instanceFollowRedirects = false
