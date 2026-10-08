@@ -35,6 +35,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.mokamusic.player.audio.dsp.AutoEqCatalog
 import com.mokamusic.player.audio.dsp.AutoEqMatch
+import com.mokamusic.player.audio.dsp.UserEqCurveStore
+import com.mokamusic.player.audio.dsp.BuiltInEqCurves
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1705,6 +1707,21 @@ private fun DspScreen() {
     var autoEqList by remember { mutableStateOf<List<AutoEqMatch>>(emptyList()) }
     var autoEqBusy by remember { mutableStateOf(false) }
     var autoEqStatus by remember { mutableStateOf<String?>(null) }
+    var autoEqDialog by remember { mutableStateOf<String?>(null) }
+    var autoEqRequest by remember { mutableIntStateOf(0) }
+    val savedEqStore = remember { UserEqCurveStore(context.applicationContext) }
+    var savedCurves by remember { mutableStateOf(savedEqStore.list()) }
+    var eqPresetName by remember { mutableStateOf("") }
+    var eqPresetMessage by remember { mutableStateOf<String?>(null) }
+    var eqPresetMenu by remember { mutableStateOf(false) }
+
+    fun clearAutoEq() {
+        autoEqRequest++
+        autoEqQuery = ""
+        autoEqList = emptyList()
+        autoEqStatus = null
+        autoEqBusy = false
+    }
 
     fun save(next: DspSettings) {
         store.save(next)
@@ -1896,6 +1913,60 @@ private fun DspScreen() {
                     Spacer(Modifier.height(12.dp))
                     EqualizerPreview(settings.eqGainsDb)
                     Spacer(Modifier.height(14.dp))
+                    Text("Saved EQ curves", fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = {
+                            save(settings.copy(eqEnabled = true, eqGainsDb = BuiltInEqCurves.flat))
+                        }) { Text("Flat") }
+                        OutlinedButton(onClick = {
+                            save(settings.copy(eqEnabled = true, eqGainsDb = BuiltInEqCurves.warm))
+                        }) { Text("Warm") }
+                        OutlinedButton(onClick = {
+                            save(settings.copy(eqEnabled = true, eqGainsDb = BuiltInEqCurves.vocal))
+                        }) { Text("Vocal") }
+                    }
+                    Box {
+                        OutlinedButton(
+                            enabled = savedCurves.isNotEmpty(),
+                            onClick = { eqPresetMenu = true }
+                        ) { Text("Load saved EQ (${savedCurves.size})") }
+                        DropdownMenu(expanded = eqPresetMenu, onDismissRequest = { eqPresetMenu = false }) {
+                            savedCurves.forEach { curve ->
+                                DropdownMenuItem(text = { Text(curve.name) }, onClick = {
+                                    save(curve.applyTo(settings))
+                                    eqPresetName = curve.name
+                                    eqPresetMessage = "Loaded ${curve.name}"
+                                    eqPresetMenu = false
+                                })
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = eqPresetName,
+                        onValueChange = { eqPresetName = it; eqPresetMessage = null },
+                        label = { Text("EQ preset name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            enabled = eqPresetName.trim().isNotEmpty() && eqPresetName.trim().length <= 40,
+                            onClick = {
+                                runCatching { savedEqStore.save(eqPresetName, settings) }
+                                    .onSuccess { savedCurves = it; eqPresetMessage = "Saved EQ preset" }
+                                    .onFailure { eqPresetMessage = it.message ?: "Unable to save preset" }
+                            }
+                        ) { Text("Save EQ") }
+                        OutlinedButton(
+                            enabled = savedCurves.any { it.name == eqPresetName.trim() },
+                            onClick = {
+                                savedCurves = savedEqStore.delete(eqPresetName.trim())
+                                eqPresetMessage = "Deleted EQ preset"
+                            }
+                        ) { Text("Delete") }
+                    }
+                    eqPresetMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    Spacer(Modifier.height(14.dp))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         var modeMenu by remember { mutableStateOf(false) }
                         Box(Modifier.weight(1f)) {
@@ -1972,39 +2043,8 @@ private fun DspScreen() {
                         Icon(Icons.Default.FolderOpen, null); Spacer(Modifier.width(8.dp)); Text("Choose .vdc")
                     }
                     Spacer(Modifier.height(12.dp))
-                    Text("Find headphone correction · AutoEq", fontWeight=FontWeight.SemiBold)
-                    Text("Select a measurement to download and convert to a private local VDC file.", style=MaterialTheme.typography.bodySmall)
-                    OutlinedTextField(value=autoEqQuery,onValueChange={autoEqQuery=it},
-                        label={Text("Headphone model")},singleLine=true,modifier=Modifier.fillMaxWidth())
-                    Button(enabled=!autoEqBusy && autoEqQuery.trim().length>=3,onClick={
-                        autoEqBusy=true;autoEqStatus=null
-                        autoEqScope.launch {
-                            runCatching { withContext(Dispatchers.IO) {
-                                AutoEqCatalog.search(context.applicationContext,autoEqQuery)
-                            } }.onSuccess {
-                                autoEqList=it
-                                autoEqStatus=if(it.isEmpty())"No matching headphone" else null
-                            }.onFailure {autoEqStatus=it.message?:"Search failed"}
-                            autoEqBusy=false
-                        }
-                    }) {Text(if(autoEqBusy)"Loading…" else "Search AutoEq")}
-                    autoEqStatus?.let {Text(it,style=MaterialTheme.typography.bodySmall)}
-                    autoEqList.take(15).forEach { match ->
-                        TextButton(enabled=!autoEqBusy,onClick={
-                            autoEqBusy=true
-                            autoEqStatus="Applying ${match.model}…"
-                            autoEqScope.launch {
-                                runCatching { withContext(Dispatchers.IO) {
-                                    AutoEqCatalog.importVdc(context.applicationContext,match)
-                                } }.onSuccess { uri ->
-                                    save(settings.copy(ddcUri=uri.toString(),
-                                        ddcName="${match.model} · ${match.source}",
-                                        ddcEnabled=true,masterEnabled=true))
-                                    autoEqStatus="Loaded: ${match.model}"
-                                }.onFailure {autoEqStatus="Correction failed: ${it.message}"}
-                                autoEqBusy=false
-                            }
-                        }) {Text("${match.model} · ${match.source}")}
+                    OutlinedButton(onClick = { clearAutoEq(); autoEqDialog = "VDC" }) {
+                        Text("Find headphone correction (AutoEq)")
                     }
                 }
             }
@@ -2027,6 +2067,9 @@ private fun DspScreen() {
                     Spacer(Modifier.height(10.dp))
                     Button(onClick = { irsPicker.launch(arrayOf("audio/*", "application/octet-stream", "*/*")) }) {
                         Icon(Icons.Default.GraphicEq, null); Spacer(Modifier.width(8.dp)); Text("Choose impulse response")
+                    }
+                    OutlinedButton(onClick = { clearAutoEq(); autoEqDialog = "IR" }) {
+                        Text("Find headphone impulse (AutoEq)")
                     }
                     Spacer(Modifier.height(8.dp))
                     Text("Convolver gain  ${"%.1f".format(settings.convolverGainDb)} dB")
@@ -2080,6 +2123,122 @@ private fun DspScreen() {
             Text("Changes apply live during playback. Now Playing shows the active route and DSP state; source bit-perfect is intentionally false whenever Moka is tuning the samples.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(80.dp))
         }
+    }
+
+    if (autoEqDialog != null) {
+        val mode = autoEqDialog ?: "VDC"
+        AlertDialog(
+            onDismissRequest = { clearAutoEq(); autoEqDialog = null },
+            title = { Text(if (mode == "IR") "AutoEq convolver search" else "AutoEq headphone correction") },
+            text = {
+                Column {
+                    Text("Choose a matching headphone model and measurement source.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        value = autoEqQuery,
+                        onValueChange = {
+                            autoEqQuery = it
+                            autoEqRequest++
+                            autoEqList = emptyList()
+                            autoEqStatus = null
+                            autoEqBusy = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Headphone model") },
+                        singleLine = true,
+                        trailingIcon = {
+                            if (autoEqQuery.isNotEmpty()) {
+                                IconButton(onClick = { clearAutoEq() }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Clear query")
+                                }
+                            }
+                        }
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            enabled = !autoEqBusy && autoEqQuery.trim().length >= 3,
+                            onClick = {
+                                val query = autoEqQuery.trim()
+                                val request = ++autoEqRequest
+                                autoEqList = emptyList()
+                                autoEqBusy = true
+                                autoEqStatus = null
+                                autoEqScope.launch {
+                                    val result = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            AutoEqCatalog.search(context.applicationContext, query)
+                                        }
+                                    }
+                                    if (request == autoEqRequest && autoEqDialog == mode) {
+                                        result.onSuccess {
+                                            autoEqList = it
+                                            if (it.isEmpty()) autoEqStatus = "No matching profiles"
+                                        }.onFailure { autoEqStatus = it.message ?: "Search failed" }
+                                        autoEqBusy = false
+                                    }
+                                }
+                            }
+                        ) { Text(if (autoEqBusy) "Loading…" else "Search") }
+                        TextButton(onClick = { clearAutoEq() }) { Text("Clear") }
+                    }
+                    autoEqStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                        autoEqList.forEach { match ->
+                            TextButton(enabled = !autoEqBusy, onClick = {
+                                val request = ++autoEqRequest
+                                autoEqBusy = true
+                                autoEqStatus = "Downloading ${match.model}…"
+                                autoEqScope.launch {
+                                    val result = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            if (mode == "IR") {
+                                                AutoEqCatalog.importImpulse(context.applicationContext, match)
+                                            } else {
+                                                AutoEqCatalog.importVdc(context.applicationContext, match)
+                                            }
+                                        }
+                                    }
+                                    if (request == autoEqRequest && autoEqDialog == mode) {
+                                        result.onSuccess { uri ->
+                                            if (mode == "IR") {
+                                                save(settings.copy(
+                                                    masterEnabled = true,
+                                                    autoHeadroomEnabled = true,
+                                                    limiterEnabled = true,
+                                                    eqEnabled = false,
+                                                    ddcEnabled = false,
+                                                    convolverEnabled = true,
+                                                    convolverUri = uri.toString(),
+                                                    convolverName = "${match.model} · ${match.source}"
+                                                ))
+                                            } else {
+                                                save(settings.copy(
+                                                    masterEnabled = true,
+                                                    autoHeadroomEnabled = true,
+                                                    limiterEnabled = true,
+                                                    eqEnabled = false,
+                                                    convolverEnabled = false,
+                                                    ddcEnabled = true,
+                                                    ddcUri = uri.toString(),
+                                                    ddcName = "${match.model} · ${match.source}"
+                                                ))
+                                            }
+                                            clearAutoEq()
+                                            autoEqDialog = null
+                                        }.onFailure {
+                                            autoEqStatus = "Import failed: ${it.message}"
+                                            autoEqBusy = false
+                                        }
+                                    }
+                                }
+                            }) { Text("${match.model} · ${match.source}") }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { clearAutoEq(); autoEqDialog = null }) { Text("Close") }
+            }
+        )
     }
 }
 
