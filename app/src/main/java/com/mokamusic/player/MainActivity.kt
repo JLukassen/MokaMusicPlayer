@@ -30,6 +30,11 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import com.mokamusic.player.audio.dsp.AutoEqCatalog
+import com.mokamusic.player.audio.dsp.AutoEqMatch
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1695,6 +1700,11 @@ private fun DspScreen() {
     var settings by remember { mutableStateOf(store.load()) }
     var autoProfilesEnabled by remember { mutableStateOf(profileStore.enabled) }
     val pixelUsbDspGuard = UsbDspSafetyPolicy.requiresDsp(context)
+    val autoEqScope=rememberCoroutineScope()
+    var autoEqQuery by remember { mutableStateOf("") }
+    var autoEqList by remember { mutableStateOf<List<AutoEqMatch>>(emptyList()) }
+    var autoEqBusy by remember { mutableStateOf(false) }
+    var autoEqStatus by remember { mutableStateOf<String?>(null) }
 
     fun save(next: DspSettings) {
         store.save(next)
@@ -1960,6 +1970,41 @@ private fun DspScreen() {
                     Spacer(Modifier.height(10.dp))
                     Button(onClick = { ddcPicker.launch(arrayOf("text/*", "application/octet-stream", "*/*")) }) {
                         Icon(Icons.Default.FolderOpen, null); Spacer(Modifier.width(8.dp)); Text("Choose .vdc")
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("Find headphone correction · AutoEq", fontWeight=FontWeight.SemiBold)
+                    Text("Select a measurement to download and convert to a private local VDC file.", style=MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(value=autoEqQuery,onValueChange={autoEqQuery=it},
+                        label={Text("Headphone model")},singleLine=true,modifier=Modifier.fillMaxWidth())
+                    Button(enabled=!autoEqBusy && autoEqQuery.trim().length>=3,onClick={
+                        autoEqBusy=true;autoEqStatus=null
+                        autoEqScope.launch {
+                            runCatching { withContext(Dispatchers.IO) {
+                                AutoEqCatalog.search(context.applicationContext,autoEqQuery)
+                            } }.onSuccess {
+                                autoEqList=it
+                                autoEqStatus=if(it.isEmpty())"No matching headphone" else null
+                            }.onFailure {autoEqStatus=it.message?:"Search failed"}
+                            autoEqBusy=false
+                        }
+                    }) {Text(if(autoEqBusy)"Loading…" else "Search AutoEq")}
+                    autoEqStatus?.let {Text(it,style=MaterialTheme.typography.bodySmall)}
+                    autoEqList.take(15).forEach { match ->
+                        TextButton(enabled=!autoEqBusy,onClick={
+                            autoEqBusy=true
+                            autoEqStatus="Applying ${match.model}…"
+                            autoEqScope.launch {
+                                runCatching { withContext(Dispatchers.IO) {
+                                    AutoEqCatalog.importVdc(context.applicationContext,match)
+                                } }.onSuccess { uri ->
+                                    save(settings.copy(ddcUri=uri.toString(),
+                                        ddcName="${match.model} · ${match.source}",
+                                        ddcEnabled=true,masterEnabled=true))
+                                    autoEqStatus="Loaded: ${match.model}"
+                                }.onFailure {autoEqStatus="Correction failed: ${it.message}"}
+                                autoEqBusy=false
+                            }
+                        }) {Text("${match.model} · ${match.source}")}
                     }
                 }
             }

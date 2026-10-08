@@ -231,54 +231,90 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
         var accumulator: LoudnessAccumulator? = null
         var encoding = AudioFormat.ENCODING_PCM_16BIT
         var channels = 2
+        var inputCount = 0L
+        var outputCount = 0L
+        var waitingMs = 0L
+        val startedMs = SystemClock.elapsedRealtime()
 
-        fun updateOutputFormat() {
-            val f = codec.outputFormat
-            val rate = f.intOrNull(MediaFormat.KEY_SAMPLE_RATE) ?: error("Decoder sample rate missing")
-            channels = f.intOrNull(MediaFormat.KEY_CHANNEL_COUNT) ?: error("Decoder channel count missing")
-            if (channels !in 1..2) throw LoudnessAnalysisException("UNSUPPORTED_CHANNELS", "Unsupported $channels-channel audio; loudness analyzer currently supports mono/stereo only", permanent = true)
-            encoding = f.intOrNull(MediaFormat.KEY_PCM_ENCODING) ?: AudioFormat.ENCODING_PCM_16BIT
-            accumulator = LoudnessAccumulator(rate, channels)
+        fun updateFormat() {
+            val format = codec.outputFormat
+            val rate = format.intOrNull(MediaFormat.KEY_SAMPLE_RATE) ?: error("Missing PCM sample rate")
+            val updatedChannels = format.intOrNull(MediaFormat.KEY_CHANNEL_COUNT) ?: error("Missing PCM channels")
+            if (updatedChannels !in 1..2) throw LoudnessAnalysisException(
+                "UNSUPPORTED_CHANNELS", "Unsupported $updatedChannels-channel audio", permanent = true
+            )
+            val updatedEncoding = format.intOrNull(MediaFormat.KEY_PCM_ENCODING)
+                ?: AudioFormat.ENCODING_PCM_16BIT
+            if (accumulator != null && (updatedChannels != channels || updatedEncoding != encoding)) {
+                throw LoudnessAnalysisException("FORMAT_CHANGED", "Midstream PCM layout changed", permanent = false)
+            }
+            channels = updatedChannels
+            encoding = updatedEncoding
+            if (accumulator == null) accumulator = LoudnessAccumulator(rate, channels)
+        }
+
+        fun receive(index: Int) {
+            if (accumulator == null) updateFormat()
+            try {
+                val output = codec.getOutputBuffer(index)
+                if (info.size > 0 && output != null) {
+                    val sampleBytes = bytesPerSample(encoding)
+                    output.position(info.offset)
+                    output.limit(info.offset + info.size)
+                    accumulator?.processPcm(
+                        output.slice().order(ByteOrder.LITTLE_ENDIAN), encoding, info.size / sampleBytes
+                    )
+                    outputCount++
+                }
+                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEnded = true
+            } finally {
+                codec.releaseOutputBuffer(index, false)
+            }
         }
 
         while (!outputEnded) {
-            if (!inputEnded) {
-                val inputIndex = codec.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
-                if (inputIndex >= 0) {
-                    val input = codec.getInputBuffer(inputIndex) ?: error("Decoder input missing")
-                    input.clear()
-                    val size = extractor.readSampleData(input, 0)
-                    if (size < 0) {
-                        codec.queueInputBuffer(inputIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        inputEnded = true
-                    } else {
-                        codec.queueInputBuffer(inputIndex, 0, size, extractor.sampleTime, 0)
-                        extractor.advance()
+            var progressed = false
+            // Queue as many compressed packets as the decoder can receive.
+            while (!inputEnded) {
+                val index = codec.dequeueInputBuffer(0)
+                if (index < 0) break
+                val buffer = codec.getInputBuffer(index) ?: error("Decoder input missing")
+                buffer.clear()
+                val size = extractor.readSampleData(buffer, 0)
+                if (size < 0) {
+                    codec.queueInputBuffer(index, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                    inputEnded = true
+                } else {
+                    codec.queueInputBuffer(index, 0, size, extractor.sampleTime.coerceAtLeast(0L), 0)
+                    extractor.advance()
+                    inputCount++
+                }
+                progressed = true
+            }
+            // Drain available output buffers without a blocking wait after every input packet.
+            while (!outputEnded) {
+                when (val index = codec.dequeueOutputBuffer(info, 0)) {
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> { updateFormat(); progressed = true }
+                    else -> {
+                        if (index < 0) break
+                        receive(index)
+                        progressed = true
                     }
                 }
             }
-
-            when (val outputIndex = codec.dequeueOutputBuffer(info, DEQUEUE_TIMEOUT_US)) {
-                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> updateOutputFormat()
-                else -> if (outputIndex >= 0) {
-                    if (accumulator == null) updateOutputFormat()
-                    val output = codec.getOutputBuffer(outputIndex)
-                    if (info.size > 0 && output != null) {
-                        val bytesPerSample = bytesPerSample(encoding)
-                        val samples = info.size / bytesPerSample
-                        output.position(info.offset)
-                        output.limit(info.offset + info.size)
-                        accumulator?.processPcm(
-                            output.slice().order(ByteOrder.LITTLE_ENDIAN),
-                            encoding,
-                            samples
-                        )
-                    }
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEnded = true
-                    codec.releaseOutputBuffer(outputIndex, false)
+            // Only wait if neither input nor output made progress.
+            if (!outputEnded && !progressed) {
+                val at = SystemClock.elapsedRealtime()
+                when (val index = codec.dequeueOutputBuffer(info, DEQUEUE_TIMEOUT_US)) {
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> updateFormat()
+                    else -> if (index >= 0) receive(index)
                 }
+                waitingMs += SystemClock.elapsedRealtime() - at
             }
         }
+
+        Log.i(LOG_TAG, "decoder throughput inputs=$inputCount outputs=$outputCount " +
+            "wallMs=${SystemClock.elapsedRealtime()-startedMs} idleWaitMs=$waitingMs")
         return (accumulator ?: error("Decoder produced no PCM")).finish()
     }
 

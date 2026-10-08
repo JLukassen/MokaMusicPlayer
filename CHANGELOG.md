@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — headphone AutoEq discovery and Samsung decoder pipelining
+- Browse AutoEq's public headphone index on demand from ViPER-DDC and import selected parametric profiles into local VDC coefficients.
+- Offline MediaCodec loudness analyzer now fills available input buffers and drains decoded PCM in batches instead of waiting for each input/output pair.
+- Adds decoder throughput telemetry for Samsung diagnostics. Sound accuracy and device speed still require physical device validation.
+- Do not redistribute third-party AutoEq measurements without reviewing their rights.
+
+
 ## 4.0.0-beta05 — Samsung Library Performance
 - Cache artwork misses across app restarts with file-fingerprint invalidation and expiration (24 hours local, 5 minutes for optional online artwork).
 - Avoid retrying missing artwork at every thumbnail size and on every new screen.
