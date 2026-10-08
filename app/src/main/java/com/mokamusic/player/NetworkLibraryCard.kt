@@ -100,6 +100,11 @@ internal class NetworkLibraryState(
     // Mixed shuffle is independent of the library browsing/paging spinner.
     var mixedShuffleBusy by mutableStateOf(false)
     var mixedShuffleStatus by mutableStateOf<String?>(null)
+    var streamCheckBusy by mutableStateOf(false)
+        private set
+    var streamCheckStatus by mutableStateOf<String?>(null)
+        private set
+    var playbackStatus by mutableStateOf<String?>(null)
     var status by mutableStateOf<String?>(null)
         private set
     var hasMoreAlbums by mutableStateOf(false)
@@ -227,6 +232,41 @@ internal class NetworkLibraryState(
         }
         // Populate Tracks on connect, without requiring a separate button press.
         if (client != null && category == 0 && browsedTracks.isEmpty()) loadTrackBatch()
+    }
+
+    /** Check whether Navidrome can serve bytes for an indexed track. */
+    fun testStream() {
+        val active = client ?: run {
+            streamCheckStatus = "Connect Navidrome first."
+            return
+        }
+        if (streamCheckBusy) return
+        streamCheckBusy = true
+        streamCheckStatus = "Testing Navidrome audio access…"
+        appScope.launch {
+            try {
+                val song = browsedTracks.firstOrNull() ?: songs.firstOrNull()
+                    ?: genreSongs.firstOrNull() ?: searchedTracks.firstOrNull()
+                    ?: withContext(Dispatchers.IO) { active.randomSongs(1).firstOrNull() }
+                if (song == null) {
+                    streamCheckStatus = "No server tracks found to test."
+                    return@launch
+                }
+                val result = withContext(Dispatchers.IO) { active.checkStream(song.id) }
+                if (client === active) {
+                    streamCheckStatus = result.message +
+                        if (result.playable) " Try playing a song in Moka."
+                        else " Check Navidrome file permissions and proxy settings."
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) {
+                if (client === active) {
+                    streamCheckStatus = "Stream check failed: ${failureHint(e)}"
+                }
+            } finally {
+                streamCheckBusy = false
+            }
+        }
     }
 
     /** Explicit network refresh; only replace the currently displayed catalog on success. */
@@ -535,6 +575,8 @@ internal class NetworkLibraryState(
         autoReconnectAttempted = true
         client = null
         password = ""
+        streamCheckStatus = null
+        playbackStatus = null
         selectedAlbum = null
         albums = emptyList()
         songs = emptyList()
