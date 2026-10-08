@@ -1,22 +1,21 @@
 package com.mokamusic.player.data
 
-import android.net.Uri
-import com.mokamusic.player.model.MusicTrack
 import org.junit.Assert.*
 import org.junit.Test
 
+/** Pure metadata policy tests; Android Uri methods are not present in local JVM tests. */
 class LibraryAuditorTest {
-    private fun track(id: Long, size: Long = 1000, title: String = "Song") =
-        MusicTrack(id, Uri.parse("content://media/external/audio/media/$id"), "$id.flac",
-            title, "Artist", "Album", 1L, 190000L, "audio/flac", size, "Music/")
-
-    @Test fun duplicatesAreCandidates() {
-        val report = LibraryAuditor.analyze(listOf(track(1), track(2), track(3, 2000)))
-        assertEquals(2, report.count(AuditCategory.DUPLICATE))
+    @Test fun probableDuplicatesMustMatchDurationAndSize() {
+        val original = LibraryAuditor.duplicateKey("Song", "Artist", 190_000, 1000)
+        assertEquals(original,
+            LibraryAuditor.duplicateKey("song", "ARTIST", 190_200, 1000))
+        assertNotEquals(original, LibraryAuditor.duplicateKey("Song", "Artist", 190_000, 2000))
     }
-    @Test fun incompleteMetadataAndSize() {
-        val report = LibraryAuditor.analyze(listOf(track(1, 0, "Unknown track")))
-        assertEquals(1, report.count(AuditCategory.MISSING_TAGS))
-        assertEquals(1, report.count(AuditCategory.INVALID_MEDIA))
+    @Test fun flagsIncompleteTagsAndSuspiciousEntries() {
+        assertEquals(listOf("title", "album"),
+            LibraryAuditor.incompleteMetadata("Unknown track", "Artist", ""))
+        assertTrue(LibraryAuditor.suspicious(0, 200_000, "content"))
+        assertTrue(LibraryAuditor.suspicious(1000, 200_000, "https"))
+        assertFalse(LibraryAuditor.suspicious(1000, 200_000, "content"))
     }
 }
