@@ -1,6 +1,6 @@
-# Beta 6 RC2: Car playback transition QA
+# Beta 6 RC2.1: Car playback transition QA
 
-This test build is `4.0.0-beta06-rc2-dev` (versionCode 32). It is **not** a
+This test build is `4.0.0-beta06-rc2.1-dev` (versionCode 33). It is **not** a
 release and should not be tagged or merged without Android device validation.
 
 ## Why
@@ -56,3 +56,27 @@ elapsed time from next-track selection to the AudioTrack's start request.
 It is **not** a precise measure of the first audible PCM frame; use a loopback
 measurement for that. Compare with RC1 using the same songs and same output
 route. Confirm playback is not truncated at the end of each track.
+
+## October 8, 2:32–2:35 PM reproduction
+
+The `Sport Go` Bluetooth A2DP route had repeated 48 kHz/stereo/float DSP
+AudioTrack creations. Three logged pre-roll intervals, measured from AudioTrack
+creation to writer-start, were about 489ms, 310ms and 391ms. These are not
+full track-transition latencies and some restarts could be user-initiated.
+There were no `MokaTransition` markers in this capture, making the source
+of each restart ambiguous. RC2.1 adds markers for library queue replacement,
+manual seeks, automatic advances, and DSP path reloads. The DSP pre-roll
+target for Bluetooth is now 250ms (previously 500ms); wired/USB keeps the
+more conservative 500ms target. Look for `DSP pre-roll:` and `startupMs=`
+plus any `AudioTrack underruns increased` warnings.
+
+Before another test, verify the installed APK:
+
+```bash
+adb shell dumpsys package com.mokamusic.player | grep -E 'versionCode=|versionName=' | head -2
+# Expect versionCode=33 and versionName=4.0.0-beta06-rc2.1-dev
+adb logcat -c
+adb logcat -v threadtime -b main -b system -b crash > moka-rc2-1-full.txt
+# Reproduce, press Ctrl-C, then review diagnostics:
+grep -Ei 'MokaTransition|MokaFocus|MokaAudio|MokaHybrid|AudioFlinger|AudioTrack|AudioFocus|MediaCodec|ANR' moka-rc2-1-full.txt > moka-rc2-1-filtered.txt
+```
