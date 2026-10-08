@@ -35,7 +35,7 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list --channel=3 | grep -E 'platforms;android-37|build-tools;37' || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-37" "build-tools;37.0.0" \
+            "platforms;android-37.2" "build-tools;37.0.0" \
             --channel=3 \
             "cmake;3.22.1" "ndk;28.2.13676358"
 
