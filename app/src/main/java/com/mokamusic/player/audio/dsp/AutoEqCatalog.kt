@@ -37,12 +37,7 @@ object AutoEqCatalog {
         return parseIndex(content, query)
     }
     fun importVdc(context: Context, match: AutoEqMatch): Uri {
-        require(match.path.isNotEmpty() && !match.path.contains(".."))
-        val folderUrl = API + match.path.split('/').joinToString("/") {
-            URLEncoder.encode(java.net.URLDecoder.decode(it, "UTF-8"), "UTF-8").replace("+", "%20")
-        }
-        val json = org.json.JSONArray(download(folderUrl, 180_000))
-        val profile = (0 until json.length()).mapNotNull { json.optJSONObject(it) }
+        val profile = filesFor(match)
             .firstOrNull { it.optString("name").endsWith("ParametricEQ.txt", true) }
             ?: error("No downloadable parametric profile for this model")
         val url = profile.getString("download_url")
@@ -54,6 +49,61 @@ object AutoEqCatalog {
         file.writeText(vdc)
         return Uri.fromFile(file)
     }
+
+    /**
+     * Import a publicly indexed AutoEq minimum-phase FIR impulse.
+     * Prefer 48 kHz when both 48/44.1 kHz WAVs are present; the convolver resamples as needed.
+     */
+    fun importImpulse(context: Context, match: AutoEqMatch): Uri {
+        val files = filesFor(match)
+        val wav = files.firstOrNull { it.optString("name").contains("minimum phase 48000Hz.wav", true) }
+            ?: files.firstOrNull { it.optString("name").contains("minimum phase 44100Hz.wav", true) }
+            ?: error("This AutoEq measurement does not include a minimum-phase WAV impulse")
+        val url = wav.optString("download_url")
+        require(url.startsWith(RAW)) { "Untrusted AutoEq impulse URL" }
+        val bytes = downloadBytes(url, 4_000_000)
+        require(bytes.size >= 44
+            && String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF"
+            && String(bytes, 8, 4, Charsets.US_ASCII) == "WAVE") { "Not a valid RIFF/WAV impulse" }
+        require(IrsWaveParser.parse(bytes).frameCount > 0) { "Invalid impulse response" }
+
+        val output = File(context.filesDir, "autoeq/${match.path.hashCode().toUInt().toString(16)}.wav")
+        output.parentFile?.mkdirs()
+        output.writeBytes(bytes)
+        return Uri.fromFile(output)
+    }
+
+    private fun filesFor(match: AutoEqMatch): List<org.json.JSONObject> {
+        require(match.path.isNotBlank() && !match.path.contains(".."))
+        val folderUrl = API + match.path.split('/').joinToString("/") {
+            URLEncoder.encode(java.net.URLDecoder.decode(it, "UTF-8"), "UTF-8").replace("+", "%20")
+        }
+        val listing = org.json.JSONArray(download(folderUrl, 180_000))
+        return (0 until listing.length()).mapNotNull { listing.optJSONObject(it) }
+    }
+
+    private fun downloadBytes(url: String, maximum: Int): ByteArray {
+        val c = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 9_000
+            readTimeout = 17_000
+            setRequestProperty("User-Agent", "MokaMusicPlayer/4.0")
+        }
+        try {
+            check(c.responseCode in 200..299) { "AutoEq HTTP ${c.responseCode}" }
+            return c.inputStream.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    check(output.size() + n <= maximum) { "AutoEq impulse too large" }
+                    output.write(buffer, 0, n)
+                }
+                output.toByteArray()
+            }
+        } finally { c.disconnect() }
+    }
+
     private fun download(url: String, max: Int): String {
         val c=(URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout=9000; readTimeout=17000
