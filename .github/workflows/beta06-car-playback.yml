@@ -2,7 +2,7 @@ name: Beta 6 car playback verification
 
 on:
   push:
-    branches: [beta06-car-playback-transitions]
+    branches: [beta06-car-playback-transitions, beta06-unified-navidrome-shuffle]
   pull_request:
     branches: [beta061-network-duplicate-safety]
   workflow_dispatch:
