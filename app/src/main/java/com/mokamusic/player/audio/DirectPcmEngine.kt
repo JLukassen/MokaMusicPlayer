@@ -341,6 +341,7 @@ class DirectPcmEngine(
                 acquireWakeLock()
                 isPlaying = true
                 setState(State.PLAYING)
+                callback.onAudioStarted()
             }
         }
     }
@@ -963,7 +964,34 @@ class DirectPcmEngine(
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setBufferSizeInBytes(bufferBytes)
 
-        val track = builder.build()
+        val parked = synchronized(outputLock) {
+            val old = parkedTrack
+            val previousRoute = parkedRouteId
+            parkedTrack = null
+            parkedRouteId = -1
+            old to previousRoute
+        }
+        val knownOutputIds = runCatching {
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.id }.toSet()
+        }.getOrDefault(emptySet())
+        val canReuse = mixer == null &&
+            parked.first != null &&
+            parked.first!!.state == AudioTrack.STATE_INITIALIZED &&
+            parked.first!!.format.sampleRate == sampleRate &&
+            parked.first!!.format.channelCount == channels &&
+            parked.first!!.format.encoding == encoding &&
+            parked.first!!.playState != AudioTrack.PLAYSTATE_PLAYING &&
+            (parked.second < 0 || parked.second in knownOutputIds)
+        val track = if (canReuse) {
+            val reused = parked.first!!
+            runCatching { reused.flush() }
+            Log.i(AUDIO_LOG_TAG, "AudioTrack reused: rate=$sampleRate channels=$channels encoding=${encoding.pcmEncodingLabel()}")
+            reused
+        } else {
+            parked.first?.let { runCatching { it.release() } }
+            builder.build()
+        }
+        runCatching { track.setVolume(outputVolume) }
         if (track.state != AudioTrack.STATE_INITIALIZED) {
             track.release()
             clearPreferredUsbMixer()
@@ -1197,7 +1225,8 @@ class DirectPcmEngine(
             runCatching { track.release() }
             return
         }
-        runCatching { track.pause(); track.flush() }
+        runCatching { track.pause() }
+        runCatching { track.flush() }
         synchronized(outputLock) {
             parkedTrack?.let { runCatching { it.release() } }
             parkedTrack = track
