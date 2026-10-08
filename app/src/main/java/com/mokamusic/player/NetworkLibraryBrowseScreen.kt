@@ -90,7 +90,7 @@ internal fun NetworkLibraryScreen(
                 modifier = Modifier.weight(1f), singleLine = true
             )
             Box {
-                OutlinedButton(onClick = { sortMenu = true }) { Text("Sort") }
+                OutlinedButton(onClick = { sortMenu = true }) { Text(sortMode) }
                 DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
                     choices.forEach { choice ->
                         DropdownMenuItem(text = { Text(choice) }, onClick = {
