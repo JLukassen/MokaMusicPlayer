@@ -37,4 +37,16 @@ class DuplicateSelectionPolicyTest {
         assertFalse(DuplicateSelectionPolicy.valid(overlap, setOf(1L, 2L)))
         assertTrue(DuplicateSelectionPolicy.valid(overlap, setOf(2L)))
     }
+    @Test fun combinedVerifiedAndSuspectedGroupsRespectEverySurvivor() {
+        // 1 and 2 are confirmed byte-identical, while 2 and 3 only appear similar.
+        val mixed = listOf(listOf(1L, 2L), listOf(2L, 3L))
+        assertTrue(DuplicateSelectionPolicy.canSelect(mixed, emptySet(), 3L))
+        assertTrue(DuplicateSelectionPolicy.valid(mixed, setOf(3L)))
+        // 1+2 would delete every confirmed copy. 2+3 would delete all
+        // suspected candidates, even though their hash may differ.
+        assertFalse(DuplicateSelectionPolicy.valid(mixed, setOf(1L, 2L)))
+        assertFalse(DuplicateSelectionPolicy.valid(mixed, setOf(2L, 3L)))
+        assertFalse(DuplicateSelectionPolicy.canSelect(mixed, setOf(3L), 2L))
+    }
+
 }
