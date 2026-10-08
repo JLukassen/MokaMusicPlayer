@@ -167,6 +167,29 @@ class SubsonicLibraryClientTest {
         assertTrue(requested.single().query.contains("size=500"))
     }
 
+    @Test fun catalogRetriesTransientHttpErrorsWithoutChangingApiParameters() {
+        var calls = 0
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            calls++
+            FakeHttps(url, albumResponse, if (calls == 1) 503 else 200)
+        }
+        assertEquals("album1", client.albums().single().id)
+        assertEquals(2, calls)
+    }
+
+    @Test fun authenticationFailuresDoNotRetryOrExposeCredentials() {
+        var calls = 0
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "secret") { url ->
+            calls++
+            FakeHttps(url, "", 401)
+        }
+        val failure = assertThrows(SubsonicHttpException::class.java) { client.albums() }
+        assertEquals(401, failure.statusCode)
+        assertEquals(1, calls)
+        assertFalse(failure.message.orEmpty().contains("secret"))
+        assertFalse(failure.message.orEmpty().contains("/rest/"))
+    }
+
     @Test fun blankSearchDoesNotCallServer() {
         val client = SubsonicLibraryClient("https://fedora.example.ts.net", "u", "pw") {
             error("Blank query should never call server")
