@@ -55,6 +55,20 @@ data class EmbeddedMetadata(
 
 class EmbeddedMetadataReader(private val context: Context) {
 
+    /**
+     * Artwork-only fast path for FLAC. Avoids calling MediaMetadataRetriever merely to fill
+     * unrelated title/artist fields when the UI only needs a cover image.
+     *
+     * WAV uses the MediaStore/native artwork path: its RIFF data chunk can be gigabytes long,
+     * and walking that chunk with an InputStream just to locate later art is expensive.
+     */
+    fun readEmbeddedArtwork(uri: Uri, displayName: String): ByteArray? = when (
+        displayName.substringAfterLast('.', "").lowercase()
+    ) {
+        "flac" -> runCatching { readFlac(uri, includeArtwork = true).artworkBytes }.getOrNull()
+        else -> null
+    }
+
     fun read(uri: Uri, displayName: String, includeArtwork: Boolean = false): EmbeddedMetadata {
         val extension = displayName.substringAfterLast('.', "").lowercase()
         val parsed = when (extension) {

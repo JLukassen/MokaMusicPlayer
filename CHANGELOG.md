@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — Samsung library artwork performance
+- Reuse the cached 652-track library immediately; avoid redundant native metadata extraction for artwork-only FLAC requests.
+- Bypass full RIFF/WAV scans when artwork alone is requested; use MediaStore thumbnail and a single native fallback instead.
+- Remember unsuccessful artwork requests by track fingerprint, reducing repeated expensive attempts for coverless files.
+- Limit parallel artwork loading to three simultaneous requests and log lookups above 500 ms with `MokaArtwork`.
+- Playback, offline loudness analysis and published `v4.0.0-beta04` APK are unchanged.
+
+
 ## 4.0.0-beta04 — Loudness Compatibility & Reliability
 - Retry Samsung FLAC extraction through an opened file descriptor, then Media3's independent extractor if Android MediaExtractor returns no audio stream.
 - Report unsupported multichannel layouts clearly, rather than treating them as silent, endlessly retried decoding failures.

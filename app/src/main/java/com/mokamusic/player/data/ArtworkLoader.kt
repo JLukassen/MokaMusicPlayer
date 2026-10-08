@@ -4,10 +4,14 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
+import android.os.SystemClock
+import android.util.Log
 import android.util.LruCache
 import android.util.Size
 import com.mokamusic.player.model.MusicTrack
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
@@ -36,33 +40,62 @@ class ArtworkLoader(private val context: Context) {
         val identity = track.albumId.takeIf { it > 0 }?.let { "album:$it" } ?: "track:${track.id}"
         val onlineIdentity = track.onlineArtworkUrl?.hashCode() ?: 0
         val key = "$identity@$bucket#$onlineIdentity"
+
+        // Album artwork may legitimately appear on another track from the same album. Cache
+        // successful images by album, but cache misses only by the specific track fingerprint.
+        val missKey = "track:${track.id}:${track.sizeBytes}:${track.dateModifiedEpochSeconds}@$bucket#$onlineIdentity"
         sharedCache.get(key)?.let { return@withContext it }
+        if (missingArtworkCache.get(missKey) == true) return@withContext null
 
-        val direct = runCatching {
-            embeddedReader.read(track.uri, track.displayName, includeArtwork = true).artworkBytes
-                ?.let { bytes -> decodeSampled(bytes, bucket) }
-        }.getOrNull()
+        // Compose may request artwork for many album/artist tiles simultaneously. Keeping native
+        // metadata extractors bounded prevents severe device-specific storage contention.
+        artworkSlots.withPermit {
+            sharedCache.get(key)?.let { return@withPermit it }
+            if (missingArtworkCache.get(missKey) == true) return@withPermit null
+            val startedMs = SystemClock.elapsedRealtime()
 
-        val thumbnail = direct ?: runCatching {
-            context.contentResolver.loadThumbnail(track.uri, Size(bucket, bucket), null)
-        }.getOrNull()
+            val direct = runCatching {
+                embeddedReader.readEmbeddedArtwork(track.uri, track.displayName)
+                    ?.let { bytes -> decodeSampled(bytes, bucket) }
+            }.getOrNull()
 
-        val retrieverBitmap = thumbnail ?: runCatching {
-            val retriever = MediaMetadataRetriever()
-            try {
-                retriever.setDataSource(context, track.uri)
-                retriever.embeddedPicture?.let { bytes -> decodeSampled(bytes, bucket) }
-            } finally {
-                retriever.release()
+            val thumbnail = direct ?: runCatching {
+                context.contentResolver.loadThumbnail(track.uri, Size(bucket, bucket), null)
+            }.getOrNull()
+
+            // Only one native MediaMetadataRetriever fallback per request. Previously,
+            // EmbeddedMetadataReader.read() already invoked it and then we invoked it again.
+            val retrieverBitmap = thumbnail ?: runCatching {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(context, track.uri)
+                    retriever.embeddedPicture?.let { bytes -> decodeSampled(bytes, bucket) }
+                } finally {
+                    retriever.release()
+                }
+            }.getOrNull()
+
+            val bitmap = retrieverBitmap ?: track.onlineArtworkUrl?.let { url ->
+                runCatching { loadOnline(url, bucket) }.getOrNull()
             }
-        }.getOrNull()
 
-        val bitmap = retrieverBitmap ?: track.onlineArtworkUrl?.let { url ->
-            runCatching { loadOnline(url, bucket) }.getOrNull()
+            if (bitmap != null) {
+                sharedCache.put(key, bitmap)
+                missingArtworkCache.remove(missKey)
+            } else {
+                missingArtworkCache.put(missKey, true)
+            }
+
+            val elapsedMs = SystemClock.elapsedRealtime() - startedMs
+            if (elapsedMs >= SLOW_ARTWORK_MS) {
+                Log.i(
+                    ARTWORK_LOG_TAG,
+                    "slow lookup trackId=${track.id} albumId=${track.albumId} " +
+                        "bucket=$bucket elapsedMs=$elapsedMs found=${bitmap != null}"
+                )
+            }
+            bitmap
         }
-
-        bitmap?.let { sharedCache.put(key, it) }
-        bitmap
     }
 
     private fun loadOnline(url: String, target: Int): Bitmap? {
@@ -108,6 +141,12 @@ class ArtworkLoader(private val context: Context) {
 
     companion object {
         private const val MAX_ONLINE_ART_BYTES = 12L * 1024L * 1024L
+        private const val SLOW_ARTWORK_MS = 500L
+        private const val ARTWORK_LOG_TAG = "MokaArtwork"
+
+        // Bounded concurrency prevents many simultaneous native media extractor sessions.
+        private val artworkSlots = Semaphore(3)
+        private val missingArtworkCache: LruCache<String, Boolean> = LruCache(2_048)
 
         private val maxCacheKb: Int by lazy {
             val runtimeKb = (Runtime.getRuntime().maxMemory() / 1024L).toInt()
@@ -121,7 +160,10 @@ class ArtworkLoader(private val context: Context) {
             }
         }
 
-        fun clearMemoryCache() = sharedCache.evictAll()
+        fun clearMemoryCache() {
+            sharedCache.evictAll()
+            missingArtworkCache.evictAll()
+        }
 
         private fun sizeBucket(requested: Int): Int = when {
             requested <= 128 -> 128
