@@ -51,6 +51,34 @@ internal class NetworkLibraryState(
     var rememberLogin by mutableStateOf(prefs.getBoolean("remember_login", true))
         private set
     var search by mutableStateOf("")
+    var category by mutableIntStateOf(1) // 0 Tracks, 1 Albums, 2 Artists, 3 Genres
+        private set
+    var artists by mutableStateOf<List<com.mokamusic.player.network.NetworkArtist>>(emptyList())
+        private set
+    var genres by mutableStateOf<List<com.mokamusic.player.network.NetworkGenre>>(emptyList())
+        private set
+    var selectedArtist by mutableStateOf<com.mokamusic.player.network.NetworkArtist?>(null)
+        private set
+    var artistAlbums by mutableStateOf<List<NetworkAlbum>>(emptyList())
+        private set
+    var selectedGenre by mutableStateOf<com.mokamusic.player.network.NetworkGenre?>(null)
+        private set
+    var genreSongs by mutableStateOf<List<NetworkSong>>(emptyList())
+        private set
+    var hasMoreGenreSongs by mutableStateOf(false)
+        private set
+    var browsedTracks by mutableStateOf<List<NetworkSong>>(emptyList())
+        private set
+    var trackAlbumCursor by mutableIntStateOf(0)
+        private set
+    var trackBrowsingComplete by mutableStateOf(false)
+        private set
+    var searchedTracks by mutableStateOf<List<NetworkSong>>(emptyList())
+        private set
+    var activeTrackSearch by mutableStateOf("")
+        private set
+    var hasMoreSearch by mutableStateOf(false)
+        private set
 
     var client by mutableStateOf<SubsonicLibraryClient?>(null)
         private set
@@ -129,6 +157,18 @@ internal class NetworkLibraryState(
             albums = first.distinctBy { it.id }
             selectedAlbum = null
             songs = emptyList()
+            artists = emptyList()
+            genres = emptyList()
+            artistAlbums = emptyList()
+            selectedArtist = null
+            selectedGenre = null
+            genreSongs = emptyList()
+            browsedTracks = emptyList()
+            trackAlbumCursor = 0
+            trackBrowsingComplete = false
+            searchedTracks = emptyList()
+            activeTrackSearch = ""
+            hasMoreSearch = false
             hasMoreAlbums = first.size == PAGE_SIZE
             nextAlbumOffset = first.size
             updateServer(target)
@@ -209,6 +249,181 @@ internal class NetworkLibraryState(
         }
     }
 
+    fun showCategory(next: Int) {
+        if (next !in 0..3) return
+        category = next
+        selectedAlbum = null
+        selectedArtist = null
+        selectedGenre = null
+        songs = emptyList()
+        search = ""
+        when (next) {
+            0 -> if (browsedTracks.isEmpty() && !trackBrowsingComplete) loadTrackBatch()
+            2 -> if (artists.isEmpty()) loadArtists()
+            3 -> if (genres.isEmpty()) loadGenres()
+        }
+    }
+
+    fun loadArtists() {
+        val active = client ?: return
+        if (busy) return
+        appScope.launch {
+            busy = true
+            status = "Loading artists…"
+            try {
+                artists = withContext(Dispatchers.IO) { active.artists() }
+                status = if (artists.isEmpty()) "No artists found." else null
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { status = "Couldn't load artists. Try again." }
+            finally { busy = false }
+        }
+    }
+
+    fun loadGenres() {
+        val active = client ?: return
+        if (busy) return
+        appScope.launch {
+            busy = true
+            status = "Loading genres…"
+            try {
+                genres = withContext(Dispatchers.IO) { active.genres() }
+                status = if (genres.isEmpty()) "No genres found." else null
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { status = "Couldn't load genres. Try again." }
+            finally { busy = false }
+        }
+    }
+
+    fun openArtist(artist: com.mokamusic.player.network.NetworkArtist) {
+        val active = client ?: return
+        if (busy) return
+        appScope.launch {
+            busy = true
+            status = "Loading artist albums…"
+            try {
+                val found = withContext(Dispatchers.IO) { active.artistAlbums(artist.id) }
+                artistAlbums = found
+                selectedArtist = artist
+                selectedAlbum = null
+                songs = emptyList()
+                status = if (found.isEmpty()) "No albums for this artist." else null
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { status = "Couldn't load artist albums." }
+            finally { busy = false }
+        }
+    }
+
+    fun backFromArtist() {
+        selectedArtist = null
+        selectedAlbum = null
+        songs = emptyList()
+        status = null
+    }
+
+    fun openGenre(genre: com.mokamusic.player.network.NetworkGenre) {
+        selectedGenre = genre
+        genreSongs = emptyList()
+        hasMoreGenreSongs = true
+        loadMoreGenreSongs()
+    }
+
+    fun backFromGenre() {
+        selectedGenre = null
+        genreSongs = emptyList()
+        hasMoreGenreSongs = false
+        status = null
+    }
+
+    fun loadMoreGenreSongs() {
+        val active = client ?: return
+        val genre = selectedGenre ?: return
+        if (busy || !hasMoreGenreSongs) return
+        appScope.launch {
+            busy = true
+            status = "Loading genre tracks…"
+            try {
+                val page = withContext(Dispatchers.IO) {
+                    active.genreSongs(genre.name, genreSongs.size, PAGE_SIZE)
+                }
+                genreSongs = (genreSongs + page).distinctBy { it.id }
+                hasMoreGenreSongs = page.size == PAGE_SIZE
+                status = if (genreSongs.isEmpty()) "No tracks in this genre." else null
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { status = "Couldn't load genre tracks." }
+            finally { busy = false }
+        }
+    }
+
+    /** Incrementally browse all tracks, eight album requests per explicit batch. */
+    fun loadTrackBatch() {
+        val active = client ?: return
+        if (busy || trackBrowsingComplete) return
+        appScope.launch {
+            busy = true
+            status = "Loading tracks from the server…"
+            try {
+                var catalog = albums
+                var offset = nextAlbumOffset
+                var more = hasMoreAlbums
+                var cursor = trackAlbumCursor
+                val collected = withContext(Dispatchers.IO) {
+                    val batch = mutableListOf<NetworkSong>()
+                    var loaded = 0
+                    while (loaded < 8) {
+                        if (cursor >= catalog.size && more) {
+                            val page = active.albums(offset, PAGE_SIZE)
+                            offset += page.size
+                            more = page.size == PAGE_SIZE
+                            catalog = (catalog + page).distinctBy { it.id }
+                        }
+                        if (cursor >= catalog.size) break
+                        batch += active.songs(catalog[cursor].id)
+                        cursor++
+                        loaded++
+                    }
+                    batch
+                }
+                albums = catalog
+                hasMoreAlbums = more
+                nextAlbumOffset = offset
+                trackAlbumCursor = cursor
+                browsedTracks = (browsedTracks + collected).distinctBy { it.id }
+                trackBrowsingComplete = cursor >= catalog.size && !more
+                status = if (browsedTracks.isEmpty()) "No server tracks found yet." else null
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { status = "Couldn't load tracks. Retry this batch." }
+            finally { busy = false }
+        }
+    }
+
+    fun searchServerTracks(query: String, more: Boolean = false) {
+        val active = client ?: return
+        val trimmed = query.trim()
+        if (busy) return
+        if (trimmed.isEmpty()) {
+            activeTrackSearch = ""
+            searchedTracks = emptyList()
+            hasMoreSearch = false
+            return
+        }
+        if (more && (!hasMoreSearch || trimmed != activeTrackSearch)) return
+        appScope.launch {
+            busy = true
+            status = "Searching server tracks…"
+            try {
+                val page = withContext(Dispatchers.IO) {
+                    active.searchSongs(trimmed, if (more) searchedTracks.size else 0, PAGE_SIZE)
+                }
+                searchedTracks = (if (more) searchedTracks + page else page).distinctBy { it.id }
+                activeTrackSearch = trimmed
+                hasMoreSearch = page.size == PAGE_SIZE
+                status = if (searchedTracks.isEmpty()) "No matching server tracks." else null
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { status = "Couldn't search server tracks." }
+            finally { busy = false }
+        }
+    }
+
     fun openAlbum(album: NetworkAlbum) {
         if (busy || client == null) return
         appScope.launch { openAlbumInternal(album) }
@@ -244,6 +459,19 @@ internal class NetworkLibraryState(
         selectedAlbum = null
         albums = emptyList()
         songs = emptyList()
+        artists = emptyList()
+        genres = emptyList()
+        selectedArtist = null
+        artistAlbums = emptyList()
+        selectedGenre = null
+        genreSongs = emptyList()
+        hasMoreGenreSongs = false
+        browsedTracks = emptyList()
+        trackAlbumCursor = 0
+        trackBrowsingComplete = false
+        searchedTracks = emptyList()
+        activeTrackSearch = ""
+        hasMoreSearch = false
         hasMoreAlbums = false
         nextAlbumOffset = 0
         search = ""
@@ -270,219 +498,3 @@ internal class NetworkLibraryState(
     }
 }
 
-/** Full-height network library browser, alongside Tracks/Albums/Artists/Genres. */
-@Composable
-internal fun NetworkLibraryScreen(
-    state: NetworkLibraryState,
-    onPlay: (NetworkSong, Uri) -> Unit
-) {
-    LaunchedEffect(state) { state.onScreenOpened() }
-
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "Network Music",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    if (state.client == null) "Navidrome / Subsonic over HTTPS"
-                    else "${state.albums.size} albums loaded · streaming",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (state.client != null) {
-                TextButton(onClick = state::disconnect, enabled = !state.busy) {
-                    Text("Disconnect")
-                }
-            }
-        }
-
-        state.status?.let { message ->
-            Text(
-                text = message,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        if (state.busy) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        }
-
-        if (state.client == null) {
-            Column(
-                Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(
-                    "Your server and username are remembered. You can save the password " +
-                        "securely on this device and reconnect automatically.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                OutlinedTextField(
-                    value = state.server, onValueChange = state::updateServer,
-                    label = { Text("Server HTTPS URL") },
-                    placeholder = { Text("https://your-server.ts.net") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = state.username, onValueChange = state::updateUsername,
-                    label = { Text("Username") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = state.password, onValueChange = { state.password = it },
-                    label = { Text("Password") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true, modifier = Modifier.fillMaxWidth()
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = state.rememberLogin,
-                        onCheckedChange = state::updateRememberLogin
-                    )
-                    Text("Remember login securely on this device")
-                }
-                Button(
-                    enabled = !state.busy && state.server.isNotBlank() &&
-                        state.username.isNotBlank() &&
-                        (state.password.isNotBlank() || state.savedLoginAvailable),
-                    onClick = state::connect,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        when {
-                            state.busy -> "Connecting…"
-                            state.savedLoginAvailable && state.password.isBlank() ->
-                                "Reconnect to saved server"
-                            else -> "Connect to library"
-                        }
-                    )
-                }
-                if (state.savedLoginAvailable) {
-                    Text(
-                        "Saved password is protected by Android Keystore and excluded from backup.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                OutlinedButton(onClick = state::forgetServer) {
-                    Text("Forget server and saved login")
-                }
-                Text(
-                    "Streaming is experimental. Offline downloads and DSP parity " +
-                        "still need device testing.",
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-        } else if (state.selectedAlbum != null) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = state::backToAlbums) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to albums")
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        state.selectedAlbum?.name.orEmpty(),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        "${state.selectedAlbum?.artist.orEmpty()} · ${state.songs.size} songs",
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(state.songs, key = { it.id }) { song ->
-                    ListItem(
-                        modifier = Modifier.clickable(enabled = !state.busy) {
-                            state.client?.let { onPlay(song, it.streamUri(song.id)) }
-                        },
-                        headlineContent = {
-                            Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        },
-                        supportingContent = {
-                            Text(song.artist, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        },
-                        leadingContent = { Icon(Icons.Default.PlayArrow, null) },
-                        trailingContent = { Text(song.durationSeconds.takeIf { it > 0 }?.let {
-                            "${it / 60}:${(it % 60).toString().padStart(2, '0')}"
-                        }.orEmpty()) }
-                    )
-                    HorizontalDivider()
-                }
-            }
-        } else {
-            OutlinedTextField(
-                value = state.search,
-                onValueChange = { state.search = it },
-                placeholder = { Text("Search loaded albums or artists") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                trailingIcon = {
-                    TextButton(
-                        onClick = state::refresh,
-                        enabled = !state.busy
-                    ) { Text("Refresh") }
-                }
-            )
-            val filtered = remember(state.albums, state.search) {
-                if (state.search.isBlank()) state.albums
-                else state.albums.filter {
-                    it.name.contains(state.search, ignoreCase = true) ||
-                        it.artist.contains(state.search, ignoreCase = true)
-                }
-            }
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(filtered, key = { it.id }) { album ->
-                    ListItem(
-                        modifier = Modifier.clickable(enabled = !state.busy) {
-                            state.openAlbum(album)
-                        },
-                        headlineContent = {
-                            Text(album.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        },
-                        supportingContent = {
-                            Text("${album.artist} · ${album.songCount} songs",
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        },
-                        leadingContent = { Icon(Icons.Default.Album, null) },
-                        trailingContent = { Icon(Icons.Default.ChevronRight, null) }
-                    )
-                    HorizontalDivider()
-                }
-                if (state.hasMoreAlbums) {
-                    item(key = "more") {
-                        OutlinedButton(
-                            onClick = state::loadMore,
-                            enabled = !state.busy,
-                            modifier = Modifier.fillMaxWidth().padding(16.dp)
-                        ) {
-                            Text(if (state.busy) "Loading…" else "Load more albums")
-                        }
-                    }
-                }
-                if (filtered.isEmpty()) {
-                    item(key = "empty") {
-                        Text(
-                            if (state.search.isNotBlank()) "No matching albums loaded."
-                            else "No albums found. Check that Navidrome has scanned your music.",
-                            modifier = Modifier.padding(20.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
