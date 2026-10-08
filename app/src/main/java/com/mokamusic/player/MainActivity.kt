@@ -1460,6 +1460,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
 
         item { SectionLabel("LIBRARY & METADATA") }
         item { LibraryMaintenanceCard(state, viewModel) }
+        item { LibraryAuditCard(state.tracks) }
         item { MetadataDisplayPreferenceCard(state, viewModel) }
         item { MetadataEnrichmentCard(state, viewModel) }
         item { LoudnessAnalysisCard(state, viewModel) }
