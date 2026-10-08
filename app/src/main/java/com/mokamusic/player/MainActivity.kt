@@ -61,8 +61,10 @@ import com.mokamusic.player.data.ArtworkLoader
 import com.mokamusic.player.data.SavedQueueStore
 import com.mokamusic.player.data.UnicodeText
 import com.mokamusic.player.audio.UsbDspSafetyPolicy
+import com.mokamusic.player.audio.AudioOutputStatus
 import com.mokamusic.player.audio.dsp.DspSettings
 import com.mokamusic.player.audio.dsp.DspDeviceProfileStore
+import com.mokamusic.player.audio.dsp.HeadphoneProfileStore
 import com.mokamusic.player.audio.dsp.DspPresetId
 import com.mokamusic.player.audio.dsp.DspPresets
 import com.mokamusic.player.audio.dsp.RouteClass
@@ -201,7 +203,7 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                     viewModel::addToQueue,
                     viewModel::toggleFavorite
                 )
-                page == 3 -> DspScreen()
+                page == 3 -> DspScreen(state.output)
                 else -> MoreScreen(state, viewModel)
             }
         }
@@ -1696,10 +1698,16 @@ private fun LoudnessAnalysisCard(state: MokaUiState, viewModel: MokaViewModel) {
 }
 
 @Composable
-private fun DspScreen() {
+private fun DspScreen(outputStatus: AudioOutputStatus) {
     val context = LocalContext.current
     val store = remember { DspSettingsStore(context.applicationContext) }
     val profileStore = remember { DspDeviceProfileStore(context.applicationContext) }
+    val headphoneStore = remember { HeadphoneProfileStore(context.applicationContext) }
+    val headphoneKey = HeadphoneProfileStore.identity(outputStatus.routeLabel, outputStatus.deviceName)
+    var headphoneAutoEnabled by remember { mutableStateOf(headphoneStore.enabled) }
+    var hasHeadphoneProfile by remember(headphoneKey) {
+        mutableStateOf(headphoneKey?.let(headphoneStore::has) ?: false)
+    }
     var settings by remember { mutableStateOf(store.load()) }
     var autoProfilesEnabled by remember { mutableStateOf(profileStore.enabled) }
     val pixelUsbDspGuard = UsbDspSafetyPolicy.requiresDsp(context)
@@ -1762,6 +1770,48 @@ private fun DspScreen() {
             Text("Shape the sound. Moka keeps every active stage visible.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(12.dp))
             DspStatusBanner(settings = settings, pixelUsbDspGuard = pixelUsbDspGuard)
+        }
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Automatic headphone profiles",
+                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Remember your current VDC, convolver, EQ and output settings for this exact " +
+                            "named playback device. Profiles apply automatically when the same " +
+                            "device is connected again.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text("Output: ${outputStatus.deviceName} · ${outputStatus.routeLabel}")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Auto-restore saved device profiles", modifier = Modifier.weight(1f))
+                        Switch(checked = headphoneAutoEnabled, onCheckedChange = {
+                            headphoneAutoEnabled = it
+                            headphoneStore.enabled = it
+                        })
+                    }
+                    if (headphoneKey == null) {
+                        Text(
+                            "This output doesn't provide a unique headphone identity. " +
+                                "Use the manual EQ/VDC presets instead of guessing which headphones are connected.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    } else {
+                        Text(if (hasHeadphoneProfile) "Saved profile available for this output"
+                            else "No profile saved for this output")
+                        Button(onClick = {
+                            headphoneStore.save(headphoneKey, store.load())
+                            hasHeadphoneProfile = true
+                        }) { Text("Save current DSP for this device") }
+                        if (hasHeadphoneProfile) {
+                            OutlinedButton(onClick = {
+                                headphoneStore.remove(headphoneKey)
+                                hasHeadphoneProfile = false
+                            }) { Text("Forget this device profile") }
+                        }
+                    }
+                }
+            }
         }
         item {
             ElevatedCard(Modifier.fillMaxWidth()) {

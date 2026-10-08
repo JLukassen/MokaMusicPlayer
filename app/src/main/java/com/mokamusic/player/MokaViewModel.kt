@@ -27,6 +27,7 @@ import com.mokamusic.player.audio.Bs1770LoudnessAnalyzer
 import com.mokamusic.player.audio.LoudnessAnalysisStore
 import com.mokamusic.player.audio.LoudnessRecord
 import com.mokamusic.player.audio.dsp.DspDeviceProfileStore
+import com.mokamusic.player.audio.dsp.HeadphoneProfileStore
 import com.mokamusic.player.audio.dsp.DspMeterSnapshot
 import com.mokamusic.player.audio.dsp.DspPresetId
 import com.mokamusic.player.audio.dsp.DspPresets
@@ -103,6 +104,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private val outputInspector = AudioOutputInspector(application)
     private val dspStore = DspSettingsStore(application)
     private val deviceProfiles = DspDeviceProfileStore(application)
+    private val headphoneProfiles = HeadphoneProfileStore(application)
     private val favoritePrefs = application.getSharedPreferences("moka_favorites", android.content.Context.MODE_PRIVATE)
     private val libraryEnricher = LibraryEnricher(application)
     private val onlineMetadataStore = OnlineMetadataStore(application)
@@ -123,6 +125,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private var technicalJob: Job? = null
     private var mediaStoreRefreshJob: Job? = null
     private var lastProfileRoute: RouteClass? = null
+    private var lastHeadphoneIdentity: String? = null
 
     private val mediaStoreObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean, uri: Uri?) { scheduleAutomaticLibraryRefresh() }
@@ -786,13 +789,22 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshOutputStatus() {
         val status = outputInspector.inspect()
         val route = classifyRoute(status.routeLabel)
-        if (deviceProfiles.enabled && route != lastProfileRoute) {
+        val headphoneIdentity = HeadphoneProfileStore.identity(status.routeLabel, status.deviceName)
+        // Named output profiles win over broad route presets only when the user opted in.
+        // Never guess a headset from a generic "Bluetooth headphones" label.
+        val selected = headphoneIdentity?.takeIf { headphoneProfiles.enabled && headphoneProfiles.has(it) }
+        if (selected != null && selected != lastHeadphoneIdentity) {
+            lastHeadphoneIdentity = selected
             lastProfileRoute = route
-            val preset = deviceProfiles.get(route)
-            if (preset != DspPresetId.KEEP) {
-                dspStore.save(DspPresets.apply(preset, dspStore.load()))
+            headphoneProfiles.get(selected)?.let { dspStore.save(it) }
+        } else if (selected == null) {
+            lastHeadphoneIdentity = null
+            if (deviceProfiles.enabled && route != lastProfileRoute) {
+                val preset = deviceProfiles.get(route)
+                if (preset != DspPresetId.KEEP) {
+                    dspStore.save(DspPresets.apply(preset, dspStore.load()))
+                }
             }
-        } else if (lastProfileRoute == null) {
             lastProfileRoute = route
         }
         val meters = DspRuntimeMonitor.snapshot()
