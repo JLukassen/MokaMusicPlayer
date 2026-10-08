@@ -15,6 +15,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
@@ -72,6 +73,7 @@ data class MokaUiState(
     val metadataNamePreference: MetadataNamePreference = MetadataNamePreference.FILE_TAGS,
     val controllerReady: Boolean = false,
     val currentTrack: MusicTrack? = null,
+    val networkPlaybackError: String? = null,
     val technical: AudioTechnicalMetadata = AudioTechnicalMetadata(),
     val output: AudioOutputStatus = AudioOutputStatus(),
     val isPlaying: Boolean = false,
@@ -141,7 +143,35 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) = syncPlaybackState()
         override fun onPlaybackStateChanged(playbackState: Int) = syncPlaybackState()
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = syncPlaybackState(readTechnical = true)
+        override fun onPlayerError(error: PlaybackException) {
+            val activeUri = controller?.currentMediaItem?.localConfiguration?.uri
+            if (activeUri?.scheme?.lowercase() == "https") {
+                val hint = when (error.errorCode) {
+                    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+                        "Navidrome returned an HTTP error. Run Test Navidrome audio stream in Settings."
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ->
+                        "Streaming timed out. Check Navidrome/Tailscale and try again."
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ->
+                        "Streaming connection failed. Check Tailscale and server connectivity."
+                    PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE,
+                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ->
+                        "Server returned unplayable audio. Check its source file and encoding."
+                    else -> "Playback failed (Media3 ${error.errorCodeName}). Test the stream in Settings."
+                }
+                val message = "Navidrome stream: $hint"
+                networkLibrary.playbackStatus = message
+                _uiState.value = _uiState.value.copy(networkPlaybackError = message)
+                // Intentionally exclude exception, cause and signed URI: these can contain auth tokens.
+                android.util.Log.w("MokaNetworkPlayback", "stream errorCode=${error.errorCode}")
+            }
+            syncPlaybackState()
+        }
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            networkLibrary.playbackStatus = null
+            _uiState.value = _uiState.value.copy(networkPlaybackError = null)
+            syncPlaybackState(readTechnical = true)
+        }
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = syncPlaybackState()
         override fun onRepeatModeChanged(repeatMode: Int) = syncPlaybackState()
         override fun onAvailableCommandsChanged(availableCommands: Player.Commands) = syncPlaybackState()
@@ -378,6 +408,8 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun playFromQueue(track: MusicTrack, queue: List<MusicTrack>, shuffle: Boolean = false) {
+        networkLibrary.playbackStatus = null
+        _uiState.value = _uiState.value.copy(networkPlaybackError = null)
         val cleanQueue = queue.distinctBy { it.id }.ifEmpty { listOf(track) }
         val mediaController = controller
         if (mediaController == null) {
