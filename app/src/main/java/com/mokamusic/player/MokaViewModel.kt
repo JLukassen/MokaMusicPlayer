@@ -321,7 +321,8 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
             id = remoteId, uri = url, displayName = song.title,
             title = song.title, artist = song.artist, album = song.album,
             albumId = -1L, durationMs = song.durationSeconds.coerceAtLeast(0) * 1000L,
-            mimeType = song.mimeType, sizeBytes = 0L, relativePath = null
+            mimeType = networkLibrary.client?.playbackMimeType(song.mimeType) ?: song.mimeType,
+            sizeBytes = 0L, relativePath = null
         )
     }
 
@@ -340,7 +341,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         val client = networkLibrary.client ?: return
         val entries = com.mokamusic.player.network.NetworkQueuePlan.build(selectedSong, songs)
         if (entries.isEmpty()) return
-        val queue = entries.map { networkMusicTrack(it, client.streamUri(it.id)) }
+        val queue = entries.map { networkMusicTrack(it, client.streamUri(it.id, it.mimeType)) }
             .distinctBy { it.id }
         val selectedId = -(selectedSong.id.hashCode().toLong() and 0x7fffffffL) - 1L
         val selected = queue.firstOrNull { it.id == selectedId } ?: return
@@ -382,7 +383,9 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                     library.mixedShuffleStatus = "Navidrome returned no songs; mixed shuffle wasn't started."
                     return@launch
                 }
-                val remoteTracks = remoteSongs.map { networkMusicTrack(it, client.streamUri(it.id)) }
+                val remoteTracks = remoteSongs.map {
+                    networkMusicTrack(it, client.streamUri(it.id, it.mimeType))
+                }
                     .distinctBy { it.id }
                 val mixedQueue = (localTracks + remoteTracks).distinctBy { it.id }
                 networkQueueTracks.clear()
