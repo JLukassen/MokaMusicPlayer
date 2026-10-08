@@ -176,7 +176,7 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when {
-                !hasPermission && page != 1 -> PermissionScreen { launcher.launch(permission) }
+                !hasPermission && page != 1 && page != 4 -> PermissionScreen { launcher.launch(permission) }
                 page == 0 -> NowPlayingScreen(state, viewModel)
                 page == 1 -> LibraryScreen(
                     selectedTab = libraryTab,
