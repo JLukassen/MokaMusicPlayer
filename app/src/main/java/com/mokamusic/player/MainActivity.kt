@@ -36,7 +36,7 @@ import kotlinx.coroutines.withContext
 import com.mokamusic.player.audio.dsp.AutoEqCatalog
 import com.mokamusic.player.audio.dsp.AutoEqMatch
 import com.mokamusic.player.audio.dsp.UserEqCurveStore
-import com.mokamusic.player.audio.dsp.BuiltInEqCurves
+import com.mokamusic.player.audio.dsp.BuiltInEqPresets
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1913,31 +1913,65 @@ private fun DspScreen() {
                     Spacer(Modifier.height(12.dp))
                     EqualizerPreview(settings.eqGainsDb)
                     Spacer(Modifier.height(14.dp))
-                    Text("Saved EQ curves", fontWeight = FontWeight.SemiBold)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(onClick = {
-                            save(settings.copy(eqEnabled = true, eqGainsDb = BuiltInEqCurves.flat))
-                        }) { Text("Flat") }
-                        OutlinedButton(onClick = {
-                            save(settings.copy(eqEnabled = true, eqGainsDb = BuiltInEqCurves.warm))
-                        }) { Text("Warm") }
-                        OutlinedButton(onClick = {
-                            save(settings.copy(eqEnabled = true, eqGainsDb = BuiltInEqCurves.vocal))
-                        }) { Text("Vocal") }
-                    }
+                    Text("EQ presets", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Pick a sound style or a saved curve. Built-ins use your current FIR/IIR mode.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Box {
-                        OutlinedButton(
-                            enabled = savedCurves.isNotEmpty(),
-                            onClick = { eqPresetMenu = true }
-                        ) { Text("Load saved EQ (${savedCurves.size})") }
-                        DropdownMenu(expanded = eqPresetMenu, onDismissRequest = { eqPresetMenu = false }) {
-                            savedCurves.forEach { curve ->
-                                DropdownMenuItem(text = { Text(curve.name) }, onClick = {
-                                    save(curve.applyTo(settings))
-                                    eqPresetName = curve.name
-                                    eqPresetMessage = "Loaded ${curve.name}"
-                                    eqPresetMenu = false
-                                })
+                        FilledTonalButton(
+                            onClick = { eqPresetMenu = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Presets… · " +
+                                    (BuiltInEqPresets.matching(settings.eqGainsDb)?.name ?: "Custom"),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = eqPresetMenu,
+                            onDismissRequest = { eqPresetMenu = false }
+                        ) {
+                            Text(
+                                "BUILT-IN",
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            BuiltInEqPresets.all.forEach { preset ->
+                                DropdownMenuItem(
+                                    text = { Text(preset.name) },
+                                    onClick = {
+                                        save(preset.applyTo(settings))
+                                        eqPresetMessage = "Applied " + preset.name + " EQ"
+                                        eqPresetMenu = false
+                                    }
+                                )
+                            }
+                            if (savedCurves.isNotEmpty()) {
+                                HorizontalDivider()
+                                Text(
+                                    "MY SAVED PRESETS",
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                savedCurves.forEach { curve ->
+                                    DropdownMenuItem(
+                                        text = { Text(curve.name) },
+                                        onClick = {
+                                            save(curve.applyTo(settings))
+                                            eqPresetName = curve.name
+                                            eqPresetMessage = "Loaded " + curve.name
+                                            eqPresetMenu = false
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
