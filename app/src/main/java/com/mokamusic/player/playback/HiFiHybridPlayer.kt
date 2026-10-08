@@ -140,6 +140,11 @@ class HiFiHybridPlayer(
         startIndex: Int,
         startPositionMs: Long
     ): ListenableFuture<*> {
+        transition.begin(
+            "queue-replacement",
+            mediaItems.getOrNull(startIndex.takeIf { it >= 0 } ?: 0)?.mediaId.orEmpty()
+        )
+        Log.i(TAG, "Queue replaced items=${mediaItems.size} startIndex=$startIndex")
         deactivateDirect(clearMonitor = true)
         restoreDucking()
         desiredPlayWhenReady = false
@@ -392,6 +397,7 @@ class HiFiHybridPlayer(
         val shouldPlay = desiredPlayWhenReady || fallback.playWhenReady
         val shouldUseDirect = direct.canAttempt(item)
 
+        transition.begin("dsp-route-rebuild", item.mediaId)
         switchingInternally = true
         try {
             if (shouldUseDirect) {
