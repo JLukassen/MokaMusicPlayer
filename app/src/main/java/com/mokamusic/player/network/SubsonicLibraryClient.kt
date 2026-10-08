@@ -9,9 +9,11 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 
 data class NetworkAlbum(val id: String, val name: String, val artist: String, val songCount: Int)
+data class NetworkArtist(val id: String, val name: String, val albumCount: Int)
+data class NetworkGenre(val name: String, val songCount: Int, val albumCount: Int)
 data class NetworkSong(
     val id: String, val title: String, val artist: String, val album: String,
-    val durationSeconds: Int, val mimeType: String?
+    val durationSeconds: Int, val mimeType: String?, val genre: String = ""
 )
 
 /**
@@ -51,10 +53,85 @@ class SubsonicLibraryClient(
         return (0 until array.length()).mapNotNull { i ->
             val item = array.optJSONObject(i) ?: return@mapNotNull null
             val id = item.optString("id").takeIf(String::isNotBlank) ?: return@mapNotNull null
-            NetworkSong(id, item.optString("title", "Unknown track"),
-                item.optString("artist", artist), title, item.optInt("duration", 0),
-                item.optString("contentType").takeIf(String::isNotBlank))
+            parseSong(item, title, artist)
         }
+    }
+
+    /** Subsonic ID3 artists are grouped into initial-letter indexes. */
+    fun artists(): List<NetworkArtist> {
+        val indexes = request("getArtists").optJSONObject("artists")
+            ?.optJSONArray("index") ?: return emptyList()
+        return (0 until indexes.length()).flatMap { i ->
+            val entries = indexes.optJSONObject(i)?.optJSONArray("artist")
+            if (entries == null) emptyList() else (0 until entries.length()).mapNotNull { j ->
+                val entry = entries.optJSONObject(j) ?: return@mapNotNull null
+                val id = entry.optString("id").takeIf(String::isNotBlank)
+                    ?: return@mapNotNull null
+                NetworkArtist(id, entry.optString("name", "Unknown artist"),
+                    entry.optInt("albumCount", 0))
+            }
+        }.distinctBy { it.id }
+    }
+
+    fun artistAlbums(artistId: String): List<NetworkAlbum> {
+        val entry = request("getArtist", mapOf("id" to artistId))
+            .optJSONObject("artist") ?: return emptyList()
+        val artist = entry.optString("name", "Unknown artist")
+        val rows = entry.optJSONArray("album") ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { i ->
+            val album = rows.optJSONObject(i) ?: return@mapNotNull null
+            val id = album.optString("id").takeIf(String::isNotBlank)
+                ?: return@mapNotNull null
+            NetworkAlbum(id, album.optString("name", "Unknown album"),
+                album.optString("artist", artist), album.optInt("songCount", 0))
+        }
+    }
+
+    fun genres(): List<NetworkGenre> {
+        val rows = request("getGenres").optJSONObject("genres")
+            ?.optJSONArray("genre") ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { i ->
+            val item = rows.optJSONObject(i) ?: return@mapNotNull null
+            val name = item.optString("value").takeIf(String::isNotBlank)
+                ?: return@mapNotNull null
+            NetworkGenre(name, item.optInt("songCount", 0), item.optInt("albumCount", 0))
+        }.distinctBy { it.name }
+    }
+
+    /** Server-side genre paging: never download an entire genre just to open it. */
+    fun genreSongs(genre: String, offset: Int = 0, size: Int = 100): List<NetworkSong> {
+        val rows = request("getSongsByGenre", mapOf(
+            "genre" to genre, "count" to size.coerceIn(1, 500).toString(),
+            "offset" to offset.coerceAtLeast(0).toString()
+        )).optJSONObject("songsByGenre")?.optJSONArray("song") ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { i ->
+            rows.optJSONObject(i)?.let { parseSong(it) }
+        }
+    }
+
+    /** Search returns matching server tracks; blank queries use album-based browsing instead. */
+    fun searchSongs(query: String, offset: Int = 0, size: Int = 100): List<NetworkSong> {
+        if (query.isBlank()) return emptyList()
+        val rows = request("search3", mapOf(
+            "query" to query.trim(), "artistCount" to "0", "albumCount" to "0",
+            "songCount" to size.coerceIn(1, 500).toString(),
+            "songOffset" to offset.coerceAtLeast(0).toString()
+        )).optJSONObject("searchResult3")?.optJSONArray("song") ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { i ->
+            rows.optJSONObject(i)?.let { parseSong(it) }
+        }
+    }
+
+    private fun parseSong(
+        item: JSONObject, fallbackAlbum: String = "Unknown album",
+        fallbackArtist: String = "Unknown artist"
+    ): NetworkSong? {
+        val id = item.optString("id").takeIf(String::isNotBlank) ?: return null
+        return NetworkSong(id, item.optString("title", "Unknown track"),
+            item.optString("artist", fallbackArtist),
+            item.optString("album", fallbackAlbum), item.optInt("duration", 0),
+            item.optString("contentType").takeIf(String::isNotBlank),
+            item.optString("genre"))
     }
 
     fun streamUri(id: String): Uri = Uri.parse(streamRequestUrl(id))
