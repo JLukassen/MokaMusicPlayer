@@ -59,6 +59,7 @@ internal class NetworkLibraryState(context: Context) {
         private set
     var hasMoreAlbums by mutableStateOf(false)
         private set
+    private var nextAlbumOffset = 0
 
     suspend fun connect() {
         if (busy || server.isBlank() || username.isBlank() || password.isBlank()) return
@@ -75,6 +76,7 @@ internal class NetworkLibraryState(context: Context) {
             selectedAlbum = null
             songs = emptyList()
             hasMoreAlbums = first.size == PAGE_SIZE
+            nextAlbumOffset = first.size
             password = ""
             prefs.edit().putString("server_url", server.trim())
                 .putString("username", username.trim()).apply()
@@ -97,6 +99,7 @@ internal class NetworkLibraryState(context: Context) {
             val first = withContext(Dispatchers.IO) { active.albums(0, PAGE_SIZE) }
             albums = first.distinctBy { it.id }
             hasMoreAlbums = first.size == PAGE_SIZE
+            nextAlbumOffset = first.size
             status = "Refreshed · ${albums.size} albums"
         } catch (e: Exception) {
             status = "Couldn't refresh albums. Check the server connection."
@@ -109,13 +112,14 @@ internal class NetworkLibraryState(context: Context) {
         val active = client ?: return
         if (busy || !hasMoreAlbums) return
         busy = true
-        val offset = albums.size
+        val offset = nextAlbumOffset
         status = "Loading more albums…"
         try {
             val next = withContext(Dispatchers.IO) {
                 active.albums(offset = offset, size = PAGE_SIZE)
             }
             albums = (albums + next).distinctBy { it.id }
+            nextAlbumOffset += next.size
             hasMoreAlbums = next.size == PAGE_SIZE
             status = "${albums.size} albums loaded"
         } catch (e: Exception) {
@@ -155,6 +159,7 @@ internal class NetworkLibraryState(context: Context) {
         albums = emptyList()
         songs = emptyList()
         hasMoreAlbums = false
+        nextAlbumOffset = 0
         search = ""
         status = "Disconnected"
     }
@@ -195,6 +200,18 @@ internal fun NetworkLibraryScreen(
                     Text("Disconnect")
                 }
             }
+        }
+
+        state.status?.let { message ->
+            Text(
+                text = message,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (state.busy) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
         if (state.client == null) {
@@ -285,7 +302,7 @@ internal fun NetworkLibraryScreen(
             OutlinedTextField(
                 value = state.search,
                 onValueChange = { state.search = it },
-                placeholder = { Text("Find an album or artist") },
+                placeholder = { Text("Search loaded albums or artists") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 trailingIcon = {
@@ -342,9 +359,5 @@ internal fun NetworkLibraryScreen(
                 }
             }
         }
-    }
-    // Status is shown outside the paged list to remain visible during network requests.
-    state.status?.let { message ->
-        // Keep status accessible via the screen's content semantics, not a transient toast.
     }
 }
