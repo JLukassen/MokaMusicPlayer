@@ -71,6 +71,26 @@ class SubsonicLibraryClientTest {
         }
     }
 
+    @Test fun wmaRequestsMp3ButFlacAndWavStayRaw() {
+        val client = SubsonicLibraryClient("https://music.example.org", "test", "secret")
+        assertTrue(client.streamRequestUrl("song-wma", "audio/x-ms-wma").contains("format=mp3"))
+        assertTrue(client.streamRequestUrl("song-asf", "audio/x-ms-asf").contains("format=mp3"))
+        assertEquals("audio/mpeg", client.playbackMimeType("audio/x-ms-wma"))
+        assertTrue(client.streamRequestUrl("song-flac", "audio/flac").contains("format=raw"))
+        assertTrue(client.streamRequestUrl("song-wav", "audio/wav").contains("format=raw"))
+        assertEquals("audio/flac", client.playbackMimeType("audio/flac"))
+    }
+
+    @Test fun streamProbeMatchesPlaybackTranscodeChoice() {
+        val requested = mutableListOf<String>()
+        val client = SubsonicLibraryClient("https://music.example.org", "test", "secret") { url ->
+            requested += url.toString()
+            FakeHttps(url, "ID3\\u0003\\u0000")
+        }
+        assertTrue(client.checkStream("song", "audio/x-ms-wma").playable)
+        assertTrue(requested.single().contains("format=mp3"))
+    }
+
     @Test fun streamUrlIsSignedAndHttps() {
         val client = SubsonicLibraryClient("https://music.example.org", "demo", "demo")
         val uri = client.streamRequestUrl("track 9")
