@@ -33,6 +33,7 @@ class MusicLibraryRepository(private val context: Context) {
     }
 
     suspend fun scan(fullRescan: Boolean = false, onProgress: (LibraryScanProgress) -> Unit = {}): List<MusicTrack> = withContext(Dispatchers.IO) {
+        val scanStartedMs = android.os.SystemClock.elapsedRealtime()
         val cachedById = if (fullRescan) emptyMap() else cache.load().associateBy { it.id }
         val preference = namePreferenceStore.load()
         val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
@@ -99,10 +100,16 @@ class MusicLibraryRepository(private val context: Context) {
                     )
                 } else {
                     parsed++
+                    val parseStartedMs = android.os.SystemClock.elapsedRealtime()
                     val mediaTitle = cursor.getString(titleColumn).usable()
                     val mediaArtist = cursor.getString(artistColumn).usable()
                     val mediaAlbum = cursor.getString(albumColumn).usable()
-                    val direct = embeddedReader.read(uri, displayName, includeArtwork = false)
+                    val direct = embeddedReader.read(
+                        uri,
+                        displayName,
+                        includeArtwork = false,
+                        mediaStoreIdentityComplete = mediaTitle != null && mediaArtist != null && mediaAlbum != null
+                    )
                     val inferred = inferFromPath(displayName, relativePath)
                     val title = UnicodeText.display(direct.title.usable() ?: mediaTitle ?: inferred.title ?: displayName.substringBeforeLast('.').ifBlank { "Unknown track" }) ?: "Unknown track"
                     val localArtist = UnicodeText.display(direct.artist.usable() ?: mediaArtist ?: inferred.artist ?: "Unknown artist") ?: "Unknown artist"
@@ -110,6 +117,14 @@ class MusicLibraryRepository(private val context: Context) {
                     val localAlbumArtist = direct.albumArtist.usable()
                     val localYear = direct.year.usable()
                     val localGenre = direct.genre.usable()
+
+                    val parseElapsedMs = android.os.SystemClock.elapsedRealtime() - parseStartedMs
+                    if (parseElapsedMs >= 500L) {
+                        android.util.Log.w(
+                            "MokaLibrary",
+                            "slow track parse id=$id name=$displayName elapsedMs=$parseElapsedMs mime=$mimeType"
+                        )
+                    }
 
                     MusicTrack(
                         id = id, uri = uri, displayName = displayName, title = title,
@@ -184,6 +199,12 @@ class MusicLibraryRepository(private val context: Context) {
             // A partial checkpoint may exist, but never advertise it as fully synchronized.
             statePrefs.edit().remove(STORE_MARKER_KEY).apply()
         }
+        android.util.Log.i(
+            "MokaLibrary",
+            "scan complete total=${sorted.size} parsed=$parsed reused=$reused " +
+                "fullRescan=$fullRescan cacheSaved=$cacheSaved elapsedMs=" +
+                "${android.os.SystemClock.elapsedRealtime() - scanStartedMs}"
+        )
         sorted
     }
 

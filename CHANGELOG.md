@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased — Samsung library artwork performance
+## 4.0.0-beta05 — Samsung Library Performance
+- Cache artwork misses across app restarts with file-fingerprint invalidation and expiration (24 hours local, 5 minutes for optional online artwork).
+- Avoid retrying missing artwork at every thumbnail size and on every new screen.
+- Reduce redundant provider/native artwork lookups: FLAC uses embedded FLAC picture and MediaStore, WAV uses a single native fallback.
+- Parse WAV RIFF chunks with a seekable file descriptor when available, skipping large PCM data chunks instantly while still reading post-data tags.
+- Only invoke MediaMetadataRetriever for FLAC/WAV metadata when embedded/MediaStore identity or technical fields remain incomplete.
+- Add per-track slow-parser and complete library-scan timing logs under `MokaLibrary`.
+- Preserve all existing library cache data, playback/DSP behavior, and safe Pixel USB routing.
+- Include the existing Beta 4 loudness compatibility, retry handling, cache-write hardening and native parity tests.
+
+## Previous unreleased patch — Samsung library artwork performance
 - Reuse the cached 652-track library immediately; avoid redundant native metadata extraction for artwork-only FLAC requests.
 - Bypass full RIFF/WAV scans when artwork alone is requested; use MediaStore thumbnail and a single native fallback instead.
 - Remember unsuccessful artwork requests by track fingerprint, reducing repeated expensive attempts for coverless files.

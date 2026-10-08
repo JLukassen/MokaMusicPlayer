@@ -3,12 +3,17 @@ package com.mokamusic.player.data
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.os.SystemClock
+import android.util.Log
 import java.io.BufferedInputStream
 import java.io.ByteArrayInputStream
 import java.io.EOFException
+import java.io.FileInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.channels.FileChannel
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 
@@ -69,7 +74,13 @@ class EmbeddedMetadataReader(private val context: Context) {
         else -> null
     }
 
-    fun read(uri: Uri, displayName: String, includeArtwork: Boolean = false): EmbeddedMetadata {
+    fun read(
+        uri: Uri,
+        displayName: String,
+        includeArtwork: Boolean = false,
+        mediaStoreIdentityComplete: Boolean = false
+    ): EmbeddedMetadata {
+        val startMs = SystemClock.elapsedRealtime()
         val extension = displayName.substringAfterLast('.', "").lowercase()
         val parsed = when (extension) {
             "flac" -> runCatching { readFlac(uri, includeArtwork) }.getOrNull()
@@ -77,8 +88,16 @@ class EmbeddedMetadataReader(private val context: Context) {
             else -> null
         } ?: EmbeddedMetadata()
 
-        // Android's native extractor understands additional tag variants, so use it to fill holes.
-        return parsed.mergedWith(readWithMediaMetadataRetriever(uri, includeArtwork))
+        val nativeFallback = shouldUseNativeMetadataFallback(extension, parsed, mediaStoreIdentityComplete)
+        val metadata = if (nativeFallback) {
+            parsed.mergedWith(readWithMediaMetadataRetriever(uri, includeArtwork))
+        } else parsed
+        val elapsedMs = SystemClock.elapsedRealtime() - startMs
+        if (elapsedMs >= 500) {
+            Log.w("MokaLibrary", "slow tag read file=$displayName elapsedMs=$elapsedMs " +
+                "nativeFallback=$nativeFallback extension=$extension")
+        }
+        return metadata
     }
 
     private fun readFlac(uri: Uri, includeArtwork: Boolean): EmbeddedMetadata {
@@ -184,7 +203,71 @@ class EmbeddedMetadataReader(private val context: Context) {
         ByteArray(dataLen).also { b.get(it) }
     }.getOrNull()
 
-    private fun readWav(uri: Uri, includeArtwork: Boolean): EmbeddedMetadata {
+    private fun readWav(uri: Uri, includeArtwork: Boolean): EmbeddedMetadata =
+        runCatching { readWavSeekable(uri, includeArtwork) }.getOrNull()
+            ?: readWavStream(uri, includeArtwork)
+
+    private fun readWavSeekable(uri: Uri, includeArtwork: Boolean): EmbeddedMetadata? {
+        val descriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: return null
+        ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
+            val channel = input.channel
+            val fileSize = channel.size()
+            if (fileSize < 12L) return EmbeddedMetadata()
+            val header = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
+            if (!readChannelFully(channel, header)) return EmbeddedMetadata()
+            header.flip()
+            val magic = ByteArray(4).also(header::get).toString(Charsets.US_ASCII)
+            header.int // container length, which may be smaller than the actual file size
+            val kind = ByteArray(4).also(header::get).toString(Charsets.US_ASCII)
+            if (magic != "RIFF" || kind != "WAVE") return EmbeddedMetadata()
+
+            var metadata = EmbeddedMetadata()
+            val chunkHeader = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            while (channel.position() + 8L <= fileSize) {
+                chunkHeader.clear()
+                if (!readChannelFully(channel, chunkHeader)) break
+                chunkHeader.flip()
+                val chunkId = ByteArray(4).also(chunkHeader::get).toString(Charsets.US_ASCII)
+                val length = chunkHeader.int.toLong() and 0xffffffffL
+                val start = channel.position()
+                if (length > fileSize - start) break // truncated or corrupt RIFF
+                val next = start + length + (length and 1L)
+
+                if (length in 1..MAX_WAV_TAG_CHUNK_BYTES) {
+                    when {
+                        chunkId == "fmt " -> metadata = metadata.mergedWith(
+                            parseWavFormat(readChannelBytes(channel, length.toInt()))
+                        )
+                        chunkId == "LIST" -> metadata = metadata.mergedWith(
+                            parseWavListInfo(readChannelBytes(channel, length.toInt()))
+                        )
+                        chunkId.equals("id3 ", ignoreCase = true) -> metadata = metadata.mergedWith(
+                            parseId3(readChannelBytes(channel, length.toInt()), includeArtwork)
+                        )
+                    }
+                }
+                // Crucially, large "data" chunks are seeked over rather than read/skip looped.
+                channel.position(next.coerceAtMost(fileSize))
+            }
+            return metadata
+        }
+    }
+
+    private fun readChannelBytes(channel: FileChannel, size: Int): ByteArray {
+        val bytes = ByteBuffer.allocate(size)
+        if (!readChannelFully(channel, bytes)) throw EOFException("Truncated WAV metadata chunk")
+        return bytes.array()
+    }
+
+    private fun readChannelFully(channel: FileChannel, buffer: ByteBuffer): Boolean {
+        while (buffer.hasRemaining()) {
+            val read = channel.read(buffer)
+            if (read <= 0) return false
+        }
+        return true
+    }
+
+    private fun readWavStream(uri: Uri, includeArtwork: Boolean): EmbeddedMetadata {
         context.contentResolver.openInputStream(uri)?.use { raw ->
             val input = BufferedInputStream(raw, 64 * 1024)
             if (input.readAscii(4) != "RIFF") return EmbeddedMetadata()
@@ -408,6 +491,26 @@ class EmbeddedMetadataReader(private val context: Context) {
         }.getOrDefault(EmbeddedMetadata())
     }
 }
+
+/**
+ * Skip the native retriever when our RIFF/FLAC parser already resolved audio technical fields
+ * and either embedded tags or MediaStore provide the basic song identity. Other formats
+ * continue to use the native retriever.
+ */
+internal fun shouldUseNativeMetadataFallback(
+    extension: String,
+    metadata: EmbeddedMetadata,
+    mediaStoreIdentityComplete: Boolean
+): Boolean {
+    if (extension !in setOf("flac", "wav", "wave")) return true
+    val embeddedIdentityComplete = !metadata.title.isNullOrBlank() &&
+        !metadata.artist.isNullOrBlank() && !metadata.album.isNullOrBlank()
+    val technicalComplete = metadata.sampleRateHz != null &&
+        metadata.bitDepth != null && metadata.channelCount != null
+    return !(technicalComplete && (embeddedIdentityComplete || mediaStoreIdentityComplete))
+}
+
+private const val MAX_WAV_TAG_CHUNK_BYTES = 8L * 1024L * 1024L
 
 private fun String?.clean(): String? = UnicodeText.display(this)?.takeUnless {
     it.equals("<unknown>", true) || it.equals("unknown", true)
