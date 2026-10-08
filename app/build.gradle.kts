@@ -21,8 +21,8 @@ android {
         applicationId = "com.mokamusic.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 33
-        versionName = "4.0.0-beta06-rc2.1-dev"
+        versionCode = 34
+        versionName = "4.0.0-beta06-rc2.2-dev"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
