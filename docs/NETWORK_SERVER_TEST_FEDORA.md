@@ -100,36 +100,58 @@ actual hostname will differ). Use the **exact HTTPS URL printed by Serve**.
 
 Do **not** run `tailscale funnel`, which would expose the service publicly.
 
-## 5. Connect and test
+## 5. Access Navidrome from Android over Tailscale
 
-In Moka Beta 6.1 → Library → Network tab:
+The Fedora host (not the container) runs Tailscale. Keep the Podman Navidrome
+port bound to 127.0.0.1:4533. You do NOT need Tailscale inside Navidrome.
 
-- Server HTTPS URL: the complete `https://...ts.net` address (no `/rest` path).
-- Username/password: Navidrome user created in Step 3.
-- Tap Connect → browse full-height albums → open an album → select a track for playback.
-- You can search loaded albums by name or artist, load additional album pages and refresh.
-- The connection is owned by the app's ViewModel; switching Library tabs, opening
-  Now Playing, or leaving the Network screen does not destroy the active session.
-- The URL and username are remembered while typing, even if you navigate away.
-  With **Remember login securely on this device** checked, the login password is
-  saved with Android Keystore AES-GCM in the no-backup files directory.
-  When you reopen Library → Network after an app restart, Moka attempts a
-  reconnect. You can also tap **Reconnect to saved server**.
-- **Disconnect** closes the active session but preserves the saved login.
-  **Forget server and saved login** clears stored URL, username and password.
-  Unchecking Remember login removes the stored password. If the device Keystore
-  becomes unavailable, enter your password again.
-- Network music is no longer confined to the Settings card; the Library's
-  Tracks/Albums/Artists/Genres tabs remain local.
+~~~bash
+sudo systemctl enable --now tailscaled
+tailscale status
+curl -I http://127.0.0.1:4533
+tailscale serve --bg 4533
+tailscale serve status
+~~~
 
-Until the APK can launch on a test device, a Fedora Python Subsonic smoke test
-can verify authentication, album/song endpoints and partial audio streaming
-against this address. It cannot validate Moka's Android UI or DSP.
+If prompted, enable MagicDNS and HTTPS certificates in your Tailscale
+admin DNS settings. Use the exact HTTPS address printed by Serve. It is
+private to devices permitted on your tailnet. Do not use Tailscale Funnel
+or port forwarding to expose music publicly.
 
-The current app client expects valid trusted TLS certificates, so plain
-`http://127.0.0.1:4533` is **not** a valid Moka server URL.
+On Android, install the Tailscale app, sign in to the SAME tailnet as Fedora,
+and connect the VPN. Do not exclude Moka (com.mokamusic.player) from Tailscale
+in Android app-based split tunneling. Test the HTTPS URL in the Android browser
+with Wi-Fi disabled to verify that cellular access works. An active competing
+VPN can block Tailscale.
 
-## Troubleshooting
+In Moka, go to Settings → Network Music, enter the Serve HTTPS URL (without
+/rest), the Navidrome username, and password. Tap Connect and optionally
+Remember login; the password is stored encrypted in Android Keystore.
+Disconnect retains your saved login; Forget server clears credentials.
+
+Browse using Library → Network · Navidrome, then Tracks, Albums, Artists,
+or Genres. Search server tracks on demand, browse artist albums, and load
+genre tracks in pages. Browse-all Tracks loads a few albums per batch rather
+than fetching the entire server catalog.
+
+The app requires a trusted HTTPS URL. Do not use plain HTTP localhost or
+raw 100.x.y.z Tailscale IPs without a matching TLS certificate.
+
+## 6. Troubleshooting
+
+~~~bash
+tailscale status
+tailscale serve status
+curl -I http://127.0.0.1:4533
+sudo podman logs --tail 70 moka-navidrome
+~~~
+
+If Navidrome was created rootlessly, remove sudo from podman commands.
+If Android Chrome cannot open the HTTPS address on cellular, check the
+Tailscale app, Serve status, MagicDNS, ACL permissions, and server connectivity
+before changing Moka.
+
+## More troubleshooting
 
 ```bash
 curl -I http://127.0.0.1:4533
