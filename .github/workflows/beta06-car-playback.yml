@@ -1,0 +1,57 @@
+name: Beta 6 car playback verification
+
+on:
+  push:
+    branches: [beta06-car-playback-transitions]
+  pull_request:
+    branches: [beta061-network-duplicate-safety]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: moka-car-transitions-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-37.2" "build-tools;37.0.0" \
+            --channel=3 "cmake;3.22.1" "ndk;28.2.13676358"
+      - name: Test and assemble
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --no-build-cache --stacktrace
+      - name: Verify version and package debug APK
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" |
+            grep -E "package: name='com.mokamusic.player'.*versionCode='32'.*versionName='4.0.0-beta06-rc2-dev'"
+          cp "$APK" Moka-Music-Player-4.0.0-beta06-rc2-dev-debug.apk
+          sha256sum Moka-Music-Player-4.0.0-beta06-rc2-dev-debug.apk > SHA256SUMS.txt
+      - name: Upload debug APK and test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moka-beta06-car-playback-rc2-dev
+          if-no-files-found: warn
+          path: |
+            Moka-Music-Player-4.0.0-beta06-rc2-dev-debug.apk
+            SHA256SUMS.txt
+            app/build/reports/tests/testDebugUnitTest/**
+            app/build/test-results/testDebugUnitTest/**
