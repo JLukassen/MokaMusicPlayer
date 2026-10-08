@@ -5,7 +5,8 @@
 - Report unsupported multichannel layouts clearly, rather than treating them as silent, endlessly retried decoding failures.
 - Cache failed loudness attempts independently of successful LUFS results; unsupported files are skipped until changed/reset and recoverable failures have bounded retry backoff.
 - Fix AtomicFile writes so cache streams stay open through finishWrite(), preventing failed syncs on some devices.
-- Add loudness cache and native-loudness accuracy regression tests and an Android CI build for a tagged test APK.
+- Add loudness retry-policy and native-loudness instrumentation checks, plus Android CI for a tagged test APK.
+- Add device instrumentation checks for native loudness numerical sanity and chunk-boundary consistency.
 - Keep the validated playback/DSP/USB safety path unchanged.
 
 ## 4.0.0-beta03 — Loudness Analysis Hardening

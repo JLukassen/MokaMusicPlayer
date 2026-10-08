@@ -133,7 +133,7 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
     }
 
     private fun openMedia3(track: MusicTrack): SampleSource {
-        val extractor = androidx.media3.inspector.MediaExtractorCompat()
+        val extractor = androidx.media3.inspector.MediaExtractorCompat(context)
         try {
             extractor.setDataSource(context, track.uri, null)
             return Media3SampleSource(extractor)
