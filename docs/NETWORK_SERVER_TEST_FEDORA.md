@@ -48,6 +48,34 @@ container access. If that folder is used by other confined services, consider
 copying two songs into a dedicated test folder instead. The music volume is
 read-only to Navidrome; its database in `/data` is writable.
 
+### Low-space Fedora alternative (recommended if `/home` is full)
+
+Rootless Podman usually stores downloaded images under `/home`. If that filesystem
+does not have enough free space, use a dedicated test-music directory under
+`/var/tmp` and rootful Podman storage under `/var` **instead of Step 2**:
+
+```bash
+export MUSIC_DIR="/var/tmp/moka-test-music-$USER"
+mkdir -p "$MUSIC_DIR"
+# Copy at least one real .mp3, .flac or .wav file into "$MUSIC_DIR" before continuing.
+sudo mkdir -p /var/lib/moka-navidrome
+sudo chown "$(id -u):$(id -g)" /var/lib/moka-navidrome
+sudo podman run -d --replace \
+  --name moka-navidrome \
+  --user "$(id -u):$(id -g)" \
+  -p 127.0.0.1:4533:4533 \
+  -v /var/lib/moka-navidrome:/data:Z \
+  -v "$MUSIC_DIR:/music:ro,Z" \
+  -e ND_LOGLEVEL=info \
+  docker.io/deluan/navidrome:latest
+sudo podman ps --filter name=moka-navidrome
+sudo podman logs --tail 35 moka-navidrome
+```
+
+This keeps images/database off the almost-full `/home`, and avoids SELinux
+relabeling of your entire personal music library. For logs or stopping the server
+under this alternative, use `sudo podman` rather than `podman`.
+
 ## 3. Create an administrator account
 
 In your Fedora browser, open `http://127.0.0.1:4533`. The first-run page
