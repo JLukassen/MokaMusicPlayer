@@ -2,6 +2,7 @@ package com.mokamusic.player.network
 
 import android.net.Uri
 import org.json.JSONObject
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -21,6 +22,10 @@ data class NetworkSong(
  * Username and password stay in memory; nothing is written to preferences or logs.
  * Subsonic token/salt hashes are only passed to the caller-selected HTTPS server.
  */
+/** Sanitized HTTP failure: never put the token-bearing request URL into UI or logs. */
+class SubsonicHttpException(val statusCode: Int) :
+    IllegalStateException("Navidrome HTTP $statusCode")
+
 class SubsonicLibraryClient(
     server: String,
     private val user: String,
@@ -155,35 +160,56 @@ class SubsonicLibraryClient(
     )
 
     private fun request(method: String, params: Map<String, String> = emptyMap()): JSONObject {
+        // Safe to retry metadata GETs, never any mutating API request.
         val url = URL(endpoint(method, params))
-        val connection = connectionFactory(url).apply {
-            connectTimeout = 8_000
-            readTimeout = 15_000
-            instanceFollowRedirects = false
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "MokaMusicPlayer/4.0")
-        }
-        try {
-            check(connection.responseCode in 200..299) {
-                "Server returned HTTP ${connection.responseCode}"
-            }
-            val body = connection.inputStream.use { input ->
-                val buffer = java.io.ByteArrayOutputStream()
-                val chunk = ByteArray(4096)
-                while (true) {
-                    val n = input.read(chunk)
-                    if (n == -1) break
-                    check(buffer.size() + n <= 2_000_000) { "Network response too large" }
-                    buffer.write(chunk, 0, n)
+        for (attempt in 0..1) {
+            var connection: HttpURLConnection? = null
+            try {
+                connection = connectionFactory(url).apply {
+                    connectTimeout = 15_000
+                    readTimeout = 40_000
+                    instanceFollowRedirects = false
+                    setRequestProperty("Accept", "application/json")
+                    setRequestProperty("User-Agent", "MokaMusicPlayer/4.0")
                 }
-                buffer.toString("UTF-8")
+                val code = connection.responseCode
+                if (code !in 200..299) throw SubsonicHttpException(code)
+                val body = connection.inputStream.use { input ->
+                    val buffer = java.io.ByteArrayOutputStream()
+                    val chunk = ByteArray(4096)
+                    while (true) {
+                        val n = input.read(chunk)
+                        if (n == -1) break
+                        check(buffer.size() + n <= 2_000_000) {
+                            "Network response too large"
+                        }
+                        buffer.write(chunk, 0, n)
+                    }
+                    buffer.toString("UTF-8")
+                }
+                val response = JSONObject(body).getJSONObject("subsonic-response")
+                check(response.optString("status") == "ok") {
+                    response.optJSONObject("error")?.optString("message") ?: "Subsonic server error"
+                }
+                return response
+            } catch (e: SubsonicHttpException) {
+                if (attempt == 0 && (e.statusCode == 429 || e.statusCode in 500..599)) {
+                    Thread.sleep(350)
+                    continue
+                }
+                throw e
+            } catch (e: IOException) {
+                // Covers Tailscale reconnects, transient socket failures and read timeouts.
+                if (attempt == 0) {
+                    Thread.sleep(350)
+                    continue
+                }
+                throw e
+            } finally {
+                connection?.disconnect()
             }
-            val response = JSONObject(body).getJSONObject("subsonic-response")
-            check(response.optString("status") == "ok") {
-                response.optJSONObject("error")?.optString("message") ?: "Subsonic server error"
-            }
-            return response
-        } finally { connection.disconnect() }
+        }
+        error("Navidrome request failed after retry")
     }
 
     private fun endpoint(method: String, params: Map<String, String>): String {
