@@ -539,7 +539,6 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
                     var timingText = "analyzing"
 
                     runCatching { loudnessAnalyzer.analyze(track) }
-                        runCatching { loudnessAnalyzer.analyze(track) }
                             .onSuccess { result ->
                                 val record = LoudnessRecord(
                                     trackId = track.id,
@@ -847,7 +846,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     }
     private companion object {
         const val LOUDNESS_LOG_TAG = "MokaLoudness"
-        const val LOUDNESS_CHECKPOINT_TRACKS = 8
+        const val LOUDNESS_CHECKPOINT_TRACKS = 1
         const val LOUDNESS_SESSION_ACTIVE = "active"
         const val LOUDNESS_SESSION_COMPLETED = "completed"
         const val LOUDNESS_SESSION_TOTAL = "total"

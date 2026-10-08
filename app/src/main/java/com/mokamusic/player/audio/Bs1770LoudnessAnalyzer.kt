@@ -58,11 +58,13 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
                 }
         }
 
-        val raw = analyzeWithMediaCodec(track)
-        return raw.toResult(targetLufs, SystemClock.elapsedRealtime() - started, "MediaCodec")
+        val decoded = analyzeWithExtractorOrCodec(track)
+        return decoded.raw.toResult(targetLufs, SystemClock.elapsedRealtime() - started, decoded.path)
     }
 
-    private fun analyzeWithMediaCodec(track: MusicTrack): RawResult {
+    private data class DecodedRaw(val raw: RawResult, val path: String)
+
+    private fun analyzeWithExtractorOrCodec(track: MusicTrack): DecodedRaw {
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(context, track.uri, null)
@@ -72,11 +74,14 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
             extractor.selectTrack(index)
             val inputFormat = extractor.getTrackFormat(index)
             val mime = inputFormat.getString(MediaFormat.KEY_MIME) ?: error("Audio MIME missing")
+            if (mime.equals("audio/raw", ignoreCase = true)) {
+                return DecodedRaw(analyzeRawExtractor(extractor, inputFormat), "Extractor raw PCM")
+            }
             val codec = MediaCodec.createDecoderByType(mime)
             try {
                 codec.configure(inputFormat, null, null, 0)
                 codec.start()
-                return decodeCodec(codec, extractor)
+                return DecodedRaw(decodeCodec(codec, extractor), "MediaCodec")
             } finally {
                 runCatching { codec.stop() }
                 runCatching { codec.release() }
@@ -84,6 +89,38 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
         } finally {
             runCatching { extractor.release() }
         }
+    }
+
+    private fun analyzeRawExtractor(extractor: MediaExtractor, format: MediaFormat): RawResult {
+        val rate = format.intOrNull(MediaFormat.KEY_SAMPLE_RATE) ?: error("PCM sample rate missing")
+        val channels = format.intOrNull(MediaFormat.KEY_CHANNEL_COUNT) ?: error("PCM channel count missing")
+        require(channels in 1..2) { "Loudness scan supports mono/stereo" }
+        val encoding = format.intOrNull(MediaFormat.KEY_PCM_ENCODING) ?: AudioFormat.ENCODING_PCM_16BIT
+        val bps = bytesPerSample(encoding)
+        val capacity = (format.intOrNull(MediaFormat.KEY_MAX_INPUT_SIZE) ?: DIRECT_WAV_BUFFER_BYTES)
+            .coerceIn(16 * 1024, 1024 * 1024)
+        val buffer = ByteBuffer.allocateDirect(capacity).order(ByteOrder.LITTLE_ENDIAN)
+        val accumulator = LoudnessAccumulator(rate, channels)
+
+        while (true) {
+            buffer.clear()
+            val size = extractor.readSampleData(buffer, 0)
+            if (size < 0) break
+            if (size > 0) {
+                val completeBytes = size - (size % bps)
+                if (completeBytes > 0) {
+                    buffer.position(0)
+                    buffer.limit(completeBytes)
+                    accumulator.processPcm(
+                        buffer.slice().order(ByteOrder.LITTLE_ENDIAN),
+                        encoding,
+                        completeBytes / bps
+                    )
+                }
+            }
+            if (!extractor.advance()) break
+        }
+        return accumulator.finish()
     }
 
     private fun decodeCodec(codec: MediaCodec, extractor: MediaExtractor): RawResult {
@@ -295,6 +332,10 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
     }
 
     private class LoudnessAccumulator(sampleRate: Int, private val channels: Int) {
+        private var nativeHandle: Long =
+            if (NativeLoudnessBridge.available) {
+                runCatching { NativeLoudnessBridge.nativeCreate(sampleRate, channels) }.getOrDefault(0L)
+            } else 0L
         private val shelf = Array(channels) { Biquad(highShelf(sampleRate.toDouble(), 1681.974450955533, 3.999843853973347)) }
         private val highPass = Array(channels) { Biquad(highPass(sampleRate.toDouble(), 38.13547087602444, 0.5003270373238773)) }
         private val segmentFrames = max(1, sampleRate / 10)
@@ -307,6 +348,15 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
         private var historyCount = 0
 
         fun processPcm(buffer: ByteBuffer, encoding: Int, samples: Int) {
+            val handle = nativeHandle
+            if (handle != 0L) {
+                check(buffer.isDirect) { "Native loudness analysis requires direct PCM" }
+                check(NativeLoudnessBridge.nativeProcessPcm(handle, buffer, encoding, samples)) {
+                    "Native loudness PCM processing failed"
+                }
+                return
+            }
+
             val frames = samples / channels
             for (frame in 0 until frames) {
                 var weightedPower = 0.0
@@ -360,6 +410,19 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
         }
 
         fun finish(): RawResult {
+            val handle = nativeHandle
+            if (handle != 0L) {
+                nativeHandle = 0L
+                val result = try {
+                    NativeLoudnessBridge.nativeFinish(handle)
+                        ?: error("Native loudness analysis produced no result")
+                } finally {
+                    NativeLoudnessBridge.nativeRelease(handle)
+                }
+                require(result.size >= 2) { "Invalid native loudness result" }
+                return RawResult(result[0], result[1])
+            }
+
             flushSegment()
             require(segments.isNotEmpty()) { "No PCM samples decoded" }
             val blocks = ArrayList<Double>()
