@@ -7,6 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.os.Build
 import android.util.Log
 import com.mokamusic.player.model.MusicTrack
 import java.nio.ByteBuffer
@@ -32,6 +33,10 @@ import kotlin.math.sqrt
  * rather than standards-certified dBTP. It is diagnostic; normalization is driven by loudness.
  */
 class Bs1770LoudnessAnalyzer(private val context: Context) {
+    private val backendPrefs = context.applicationContext.getSharedPreferences(
+        "moka_loudness_backend_order_v1", Context.MODE_PRIVATE
+    )
+
     data class Result(
         val integratedLufs: Float,
         val estimatedTruePeakDbtp: Float,
@@ -145,11 +150,23 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
 
     private fun analyzeWithExtractorOrCodec(track: MusicTrack): DecodedRaw {
         val failures = ArrayList<String>()
-        for ((path, factory) in listOf(
+        val formatKey = track.displayName.substringAfterLast('.', "unknown").lowercase()
+            .take(12) + "_" + Build.MANUFACTURER.lowercase().take(20)
+        val preferred = backendPrefs.getString(formatKey, null)
+        val factories: Map<String, () -> SampleSource> = mapOf(
             "Platform URI" to { openPlatformUri(track) },
             "Platform FD" to { openPlatformDescriptor(track) },
             "Media3 fallback" to { openMedia3(track) }
-        )) {
+        )
+        val ordered = LoudnessBackendOrder.select(
+            preferred = preferred,
+            samsungFlac = Build.MANUFACTURER.equals("samsung", true) &&
+                (formatKey.startsWith("flac") || track.mimeType?.contains("flac", true) == true)
+        )
+        Log.i(LOG_TAG, "extractor plan format=$formatKey preferred=${preferred ?: "none"} order=${ordered.joinToString(",")}")
+        for (path in ordered) {
+            val factory = factories.getValue(path)
+            val pathStartedMs = SystemClock.elapsedRealtime()
             try {
                 factory().use { source ->
                     val index = selectedAudioIndex(source)
@@ -161,19 +178,24 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
                         source.selectTrack(index)
                         val format = source.getTrackFormat(index)
                         val mime = format.getString(MediaFormat.KEY_MIME) ?: error("Audio MIME missing")
-                        if (mime.equals("audio/raw", ignoreCase = true)) {
-                            return DecodedRaw(analyzeRawExtractor(source, format), "$path raw PCM")
+                        val decoded = if (mime.equals("audio/raw", ignoreCase = true)) {
+                            DecodedRaw(analyzeRawExtractor(source, format), "$path raw PCM")
+                        } else {
+                            val codec = MediaCodec.createDecoderByType(mime)
+                            try {
+                                codec.configure(format, null, null, 0)
+                                codec.start()
+                                DecodedRaw(decodeCodec(codec, source), "$path codec")
+                            } finally {
+                                runCatching { codec.stop() }
+                                runCatching { codec.release() }
+                            }
                         }
-
-                        val codec = MediaCodec.createDecoderByType(mime)
-                        try {
-                            codec.configure(format, null, null, 0)
-                            codec.start()
-                            return DecodedRaw(decodeCodec(codec, source), "$path codec")
-                        } finally {
-                            runCatching { codec.stop() }
-                            runCatching { codec.release() }
-                        }
+                        backendPrefs.edit().putString(formatKey, path).apply()
+                        Log.i(LOG_TAG, "extractor success path=$path " +
+                            "elapsedMs=${SystemClock.elapsedRealtime() - pathStartedMs} " +
+                            "format=$formatKey")
+                        return decoded
                     }
                 }
             } catch (error: LoudnessAnalysisException) {
@@ -183,6 +205,9 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
             } catch (error: Exception) {
                 failures += "$path: ${error.javaClass.simpleName}: ${error.message}"
                 Log.w(LOG_TAG, "Extractor path failed path=$path name=${track.displayName}", error)
+            } finally {
+                Log.i(LOG_TAG, "extractor attempted path=$path elapsedMs=" +
+                    "${SystemClock.elapsedRealtime() - pathStartedMs} file=${track.displayName}")
             }
         }
         throw LoudnessAnalysisException(
@@ -235,6 +260,7 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
         var outputCount = 0L
         var waitingMs = 0L
         val startedMs = SystemClock.elapsedRealtime()
+        var lastProgressMs = startedMs
 
         fun updateFormat() {
             val format = codec.outputFormat
@@ -290,6 +316,7 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
                     inputCount++
                 }
                 progressed = true
+                lastProgressMs = SystemClock.elapsedRealtime()
             }
             // Drain available output buffers without a blocking wait after every input packet.
             while (!outputEnded) {
@@ -299,6 +326,7 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
                         if (index < 0) break
                         receive(index)
                         progressed = true
+                        lastProgressMs = SystemClock.elapsedRealtime()
                     }
                 }
             }
@@ -307,9 +335,18 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
                 val at = SystemClock.elapsedRealtime()
                 when (val index = codec.dequeueOutputBuffer(info, DEQUEUE_TIMEOUT_US)) {
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> updateFormat()
-                    else -> if (index >= 0) receive(index)
+                    else -> if (index >= 0) {
+                        receive(index)
+                        lastProgressMs = SystemClock.elapsedRealtime()
+                    }
                 }
                 waitingMs += SystemClock.elapsedRealtime() - at
+                if (SystemClock.elapsedRealtime() - lastProgressMs >= 30_000L) {
+                    throw LoudnessAnalysisException(
+                        "DECODER_STALL", "Decoder made no progress for 30 seconds",
+                        permanent = false
+                    )
+                }
             }
         }
 
