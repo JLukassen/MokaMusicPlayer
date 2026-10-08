@@ -1,0 +1,82 @@
+name: Beta 4 Android build and tagged APK
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta04-release
+  cancel-in-progress: false
+
+jobs:
+  test-build-publish:
+    if: github.repository == 'JLukassen/MokaMusicPlayer'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK components
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-37" "build-tools;37.0.0" \
+            "cmake;3.22.1" "ndk;28.2.13676358"
+
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug and run unit tests
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-build-cache --stacktrace
+
+      - name: Verify APK version
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" | grep -E "package: name='com.mokamusic.player'.*versionCode='25'.*versionName='4.0.0-beta04'"
+
+      - name: Record checksums
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk Moka-Music-Player-4.0.0-beta04-debug.apk
+          sha256sum Moka-Music-Player-4.0.0-beta04-debug.apk > SHA256SUMS.txt
+
+      - name: Upload test APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moka-beta04-debug-apk
+          path: |
+            Moka-Music-Player-4.0.0-beta04-debug.apk
+            SHA256SUMS.txt
+
+      - name: Tag and publish pre-release only after tests/build pass
+        if: github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=v4.0.0-beta04
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "Tag already exists, not moving a published tag."
+            exit 0
+          fi
+          git tag -a "$TAG" -m "Moka 4.0 Beta 4 — loudness compatibility test"
+          git push origin "refs/tags/$TAG"
+          gh release create "$TAG" \
+            Moka-Music-Player-4.0.0-beta04-debug.apk SHA256SUMS.txt \
+            --title "Moka Music Player 4.0 Beta 4 (test APK)" \
+            --prerelease \
+            --notes "Beta 4 loudness compatibility test build. Debug-signed APK, not Play Store release-signed. Tests and assembleDebug passed in GitHub Actions. Pixel and Samsung verification still required. Preserves the Beta 3 playback/DSP path."

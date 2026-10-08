@@ -4,9 +4,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 fail=0
-echo "Moka Beta 3 preflight"
-grep -q 'versionCode = 24' app/build.gradle.kts && echo 'PASS  versionCode 24' || { echo 'FAIL  versionCode'; fail=1; }
-grep -q 'versionName = "4.0.0-beta03"' app/build.gradle.kts && echo 'PASS  versionName 4.0.0-beta03' || { echo 'FAIL  versionName'; fail=1; }
+echo "Moka Beta 4 preflight"
+grep -q 'versionCode = 25' app/build.gradle.kts && echo 'PASS  versionCode 24' || { echo 'FAIL  versionCode'; fail=1; }
+grep -q 'versionName = "4.0.0-beta04"' app/build.gradle.kts && echo 'PASS  versionName 4.0.0-beta04' || { echo 'FAIL  versionName'; fail=1; }
 grep -q 'analyzeWavDirect' app/src/main/java/com/mokamusic/player/audio/Bs1770LoudnessAnalyzer.kt && echo 'PASS  direct WAV loudness path' || { echo 'FAIL  direct WAV path'; fail=1; }
 grep -q 'processPcm' app/src/main/java/com/mokamusic/player/audio/Bs1770LoudnessAnalyzer.kt && echo 'PASS  zero-copy PCM accumulator path' || { echo 'FAIL  PCM accumulator path'; fail=1; }
 grep -q 'NativeLoudnessBridge' app/src/main/java/com/mokamusic/player/audio/Bs1770LoudnessAnalyzer.kt && echo 'PASS  native loudness hot loop' || { echo 'FAIL  native loudness path'; fail=1; }

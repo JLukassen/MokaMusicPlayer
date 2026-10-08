@@ -54,7 +54,8 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
                     return raw.toResult(targetLufs, SystemClock.elapsedRealtime() - started, "Direct WAV PCM")
                 }
                 .onFailure { error ->
-                    Log.w(LOG_TAG, "Direct WAV path failed for ${track.displayName}; falling back to MediaCodec", error)
+                    if (error is LoudnessAnalysisException && error.permanent) throw error
+                    Log.w(LOG_TAG, "Direct WAV path failed for ${track.displayName}; falling back to extractors", error)
                 }
         }
 
@@ -64,37 +65,137 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
 
     private data class DecodedRaw(val raw: RawResult, val path: String)
 
-    private fun analyzeWithExtractorOrCodec(track: MusicTrack): DecodedRaw {
+    private interface SampleSource : java.io.Closeable {
+        val trackCount: Int
+        fun getTrackFormat(index: Int): MediaFormat
+        fun selectTrack(index: Int)
+        fun readSampleData(buffer: ByteBuffer, offset: Int): Int
+        val sampleTime: Long
+        fun advance(): Boolean
+    }
+
+    private class PlatformSampleSource(val extractor: MediaExtractor) : SampleSource {
+        override val trackCount get() = extractor.trackCount
+        override fun getTrackFormat(index: Int) = extractor.getTrackFormat(index)
+        override fun selectTrack(index: Int) = extractor.selectTrack(index)
+        override fun readSampleData(buffer: ByteBuffer, offset: Int) = extractor.readSampleData(buffer, offset)
+        override val sampleTime get() = extractor.sampleTime
+        override fun advance() = extractor.advance()
+        override fun close() = extractor.release()
+    }
+
+    private class Media3SampleSource(
+        private val extractor: androidx.media3.inspector.MediaExtractorCompat
+    ) : SampleSource {
+        override val trackCount get() = extractor.trackCount
+        override fun getTrackFormat(index: Int) = extractor.getTrackFormat(index)
+        override fun selectTrack(index: Int) = extractor.selectTrack(index)
+        override fun readSampleData(buffer: ByteBuffer, offset: Int) = extractor.readSampleData(buffer, offset)
+        override val sampleTime get() = extractor.sampleTime
+        override fun advance() = extractor.advance()
+        override fun close() = extractor.release()
+    }
+
+    private fun selectedAudioIndex(source: SampleSource): Int? =
+        (0 until source.trackCount).firstOrNull { index ->
+            source.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
+                ?.startsWith("audio/", ignoreCase = true) == true
+        }
+
+    private fun openPlatformUri(track: MusicTrack): SampleSource {
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(context, track.uri, null)
-            val index = (0 until extractor.trackCount).firstOrNull { i ->
-                extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
-            } ?: error("No audio stream")
-            extractor.selectTrack(index)
-            val inputFormat = extractor.getTrackFormat(index)
-            val mime = inputFormat.getString(MediaFormat.KEY_MIME) ?: error("Audio MIME missing")
-            if (mime.equals("audio/raw", ignoreCase = true)) {
-                return DecodedRaw(analyzeRawExtractor(extractor, inputFormat), "Extractor raw PCM")
-            }
-            val codec = MediaCodec.createDecoderByType(mime)
-            try {
-                codec.configure(inputFormat, null, null, 0)
-                codec.start()
-                return DecodedRaw(decodeCodec(codec, extractor), "MediaCodec")
-            } finally {
-                runCatching { codec.stop() }
-                runCatching { codec.release() }
-            }
-        } finally {
-            runCatching { extractor.release() }
+            return PlatformSampleSource(extractor)
+        } catch (error: Throwable) {
+            extractor.release()
+            throw error
         }
     }
 
-    private fun analyzeRawExtractor(extractor: MediaExtractor, format: MediaFormat): RawResult {
+    private fun openPlatformDescriptor(track: MusicTrack): SampleSource {
+        val extractor = MediaExtractor()
+        try {
+            val descriptor = context.contentResolver.openAssetFileDescriptor(track.uri, "r")
+                ?: error("Unable to open audio file descriptor")
+            descriptor.use { afd ->
+                if (afd.length >= 0) {
+                    extractor.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                } else {
+                    extractor.setDataSource(afd.fileDescriptor)
+                }
+            }
+            return PlatformSampleSource(extractor)
+        } catch (error: Throwable) {
+            extractor.release()
+            throw error
+        }
+    }
+
+    private fun openMedia3(track: MusicTrack): SampleSource {
+        val extractor = androidx.media3.inspector.MediaExtractorCompat()
+        try {
+            extractor.setDataSource(context, track.uri, null)
+            return Media3SampleSource(extractor)
+        } catch (error: Throwable) {
+            extractor.release()
+            throw error
+        }
+    }
+
+    private fun analyzeWithExtractorOrCodec(track: MusicTrack): DecodedRaw {
+        val failures = ArrayList<String>()
+        for ((path, factory) in listOf(
+            "Platform URI" to { openPlatformUri(track) },
+            "Platform FD" to { openPlatformDescriptor(track) },
+            "Media3 fallback" to { openMedia3(track) }
+        )) {
+            try {
+                factory().use { source ->
+                    val index = selectedAudioIndex(source)
+                    if (index == null) {
+                        Log.w(LOG_TAG, "No audio track: path=$path name=${track.displayName} tracks=${source.trackCount} mime=${track.mimeType} bytes=${track.sizeBytes}")
+                        failures += "$path: no audio track (tracks=${source.trackCount})"
+                    } else {
+                        Log.i(LOG_TAG, "Extractor selected path=$path name=${track.displayName} tracks=${source.trackCount}")
+                        source.selectTrack(index)
+                        val format = source.getTrackFormat(index)
+                        val mime = format.getString(MediaFormat.KEY_MIME) ?: error("Audio MIME missing")
+                        if (mime.equals("audio/raw", ignoreCase = true)) {
+                            return DecodedRaw(analyzeRawExtractor(source, format), "$path raw PCM")
+                        }
+
+                        val codec = MediaCodec.createDecoderByType(mime)
+                        try {
+                            codec.configure(format, null, null, 0)
+                            codec.start()
+                            return DecodedRaw(decodeCodec(codec, source), "$path codec")
+                        } finally {
+                            runCatching { codec.stop() }
+                            runCatching { codec.release() }
+                        }
+                    }
+                }
+            } catch (error: LoudnessAnalysisException) {
+                if (error.permanent) throw error
+                failures += "$path: ${error.message}"
+                Log.w(LOG_TAG, "Extractor path failed path=$path name=${track.displayName}", error)
+            } catch (error: Exception) {
+                failures += "$path: ${error.javaClass.simpleName}: ${error.message}"
+                Log.w(LOG_TAG, "Extractor path failed path=$path name=${track.displayName}", error)
+            }
+        }
+        throw LoudnessAnalysisException(
+            "EXTRACTION_FAILED",
+            "No audio stream after 3 backends for ${track.displayName}: ${failures.joinToString("; ").take(250)}",
+            permanent = false
+        )
+    }
+
+    private fun analyzeRawExtractor(extractor: SampleSource, format: MediaFormat): RawResult {
         val rate = format.intOrNull(MediaFormat.KEY_SAMPLE_RATE) ?: error("PCM sample rate missing")
         val channels = format.intOrNull(MediaFormat.KEY_CHANNEL_COUNT) ?: error("PCM channel count missing")
-        require(channels in 1..2) { "Loudness scan supports mono/stereo" }
+        if (channels !in 1..2) throw LoudnessAnalysisException("UNSUPPORTED_CHANNELS", "Unsupported $channels-channel audio; loudness analyzer currently supports mono/stereo only", permanent = true)
         val encoding = format.intOrNull(MediaFormat.KEY_PCM_ENCODING) ?: AudioFormat.ENCODING_PCM_16BIT
         val bps = bytesPerSample(encoding)
         val capacity = (format.intOrNull(MediaFormat.KEY_MAX_INPUT_SIZE) ?: DIRECT_WAV_BUFFER_BYTES)
@@ -123,7 +224,7 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
         return accumulator.finish()
     }
 
-    private fun decodeCodec(codec: MediaCodec, extractor: MediaExtractor): RawResult {
+    private fun decodeCodec(codec: MediaCodec, extractor: SampleSource): RawResult {
         val info = MediaCodec.BufferInfo()
         var inputEnded = false
         var outputEnded = false
@@ -135,7 +236,7 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
             val f = codec.outputFormat
             val rate = f.intOrNull(MediaFormat.KEY_SAMPLE_RATE) ?: error("Decoder sample rate missing")
             channels = f.intOrNull(MediaFormat.KEY_CHANNEL_COUNT) ?: error("Decoder channel count missing")
-            require(channels in 1..2) { "Loudness scan supports mono/stereo" }
+            if (channels !in 1..2) throw LoudnessAnalysisException("UNSUPPORTED_CHANNELS", "Unsupported $channels-channel audio; loudness analyzer currently supports mono/stereo only", permanent = true)
             encoding = f.intOrNull(MediaFormat.KEY_PCM_ENCODING) ?: AudioFormat.ENCODING_PCM_16BIT
             accumulator = LoudnessAccumulator(rate, channels)
         }
@@ -191,7 +292,7 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
         ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
             val channel = input.channel
             val info = parseWav(channel)
-            require(info.channels in 1..2) { "Loudness scan supports mono/stereo" }
+            if (info.channels !in 1..2) throw LoudnessAnalysisException("UNSUPPORTED_CHANNELS", "Unsupported WAV channel layout: ${info.channels} channels", permanent = true)
 
             val accumulator = LoudnessAccumulator(info.sampleRate, info.channels)
             val bytesPerSample = bytesPerSample(info.encoding)
