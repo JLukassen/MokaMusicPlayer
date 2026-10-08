@@ -110,4 +110,48 @@ class SubsonicLibraryClientTest {
         assertEquals("https://music.example.org/prefix",
             SubsonicLibraryClient.validateServerUrl("https://music.example.org/prefix/rest/"))
     }
+
+    @Test fun categoriesUseServerIndexesAndGenrePaging() {
+        val requested = mutableListOf<URL>()
+        val client = SubsonicLibraryClient("https://fedora.example.ts.net", "u", "pw") { url ->
+            requested += url
+            val body = when (url.path.substringAfterLast("/")) {
+                "getArtists.view" -> """{"subsonic-response":{"status":"ok","artists":{
+                    "index":[{"name":"A","artist":[{"id":"ar1","name":"ILLIT","albumCount":3}]}]}}}"""
+                "getArtist.view" -> """{"subsonic-response":{"status":"ok","artist":{
+                    "name":"ILLIT","album":[{"id":"al1","name":"Bomb","songCount":5}]}}}"""
+                "getGenres.view" -> """{"subsonic-response":{"status":"ok","genres":{
+                    "genre":[{"value":"K-Pop","songCount":29,"albumCount":4}]}}}"""
+                "getSongsByGenre.view" -> """{"subsonic-response":{"status":"ok","songsByGenre":{
+                    "song":[{"id":"s1","title":"Magnetic","artist":"ILLIT","album":"Super Real Me",
+                    "genre":"K-Pop","duration":170,"contentType":"audio/flac"}]}}}"""
+                "search3.view" -> """{"subsonic-response":{"status":"ok","searchResult3":{
+                    "song":[{"id":"s1","title":"Magnetic","artist":"ILLIT","album":"Super Real Me"}]}}}"""
+                else -> error("Unexpected endpoint " + url.path)
+            }
+            FakeHttps(url, body)
+        }
+        assertEquals("ILLIT", client.artists().single().name)
+        assertEquals(3, client.artists().single().albumCount)
+        assertEquals("Bomb", client.artistAlbums("ar1").single().name)
+        assertEquals("K-Pop", client.genres().single().name)
+        assertEquals(29, client.genres().single().songCount)
+        assertEquals("Magnetic", client.genreSongs("K-Pop", 100, 30).single().title)
+        assertEquals("K-Pop", client.genreSongs("K-Pop", 0, 10).single().genre)
+        assertEquals("Magnetic", client.searchSongs("Magnetic", 25, 50).single().title)
+        assertTrue(requested.any { it.path.endsWith("/getArtist.view") &&
+            it.query.contains("id=ar1") })
+        assertTrue(requested.any { it.path.endsWith("/getSongsByGenre.view") &&
+            it.query.contains("offset=100") && it.query.contains("count=30") &&
+            it.query.contains("genre=K-Pop") })
+        assertTrue(requested.any { it.path.endsWith("/search3.view") &&
+            it.query.contains("songOffset=25") && it.query.contains("songCount=50") })
+    }
+
+    @Test fun blankSearchDoesNotCallServer() {
+        val client = SubsonicLibraryClient("https://fedora.example.ts.net", "u", "pw") {
+            error("Blank query should never call server")
+        }
+        assertTrue(client.searchSongs("   ").isEmpty())
+    }
 }
