@@ -148,6 +148,25 @@ class SubsonicLibraryClientTest {
             it.query.contains("songOffset=25") && it.query.contains("songCount=50") })
     }
 
+    @Test fun randomSongsUsesSubsonicEndpointAndDeduplicatesResults() {
+        val requested = mutableListOf<URL>()
+        val response = """{"subsonic-response":{"status":"ok","randomSongs":{"song":[
+            {"id":"101","title":"A","artist":"ILLIT","album":"Bomb","contentType":"audio/flac"},
+            {"id":"102","title":"B","artist":"ILLIT","album":"Bomb"},
+            {"id":"101","title":"A","artist":"ILLIT","album":"Bomb"}
+        ]}}}"""
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            requested += url
+            FakeHttps(url, response)
+        }
+        val songs = client.randomSongs(900)
+        assertEquals(listOf("101", "102"), songs.map { it.id })
+        assertEquals("ILLIT", songs.first().artist)
+        assertEquals("audio/flac", songs.first().mimeType)
+        assertTrue(requested.single().path.endsWith("/rest/getRandomSongs.view"))
+        assertTrue(requested.single().query.contains("size=500"))
+    }
+
     @Test fun blankSearchDoesNotCallServer() {
         val client = SubsonicLibraryClient("https://fedora.example.ts.net", "u", "pw") {
             error("Blank query should never call server")
