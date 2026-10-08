@@ -117,6 +117,8 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
     var search by rememberSaveable { mutableStateOf("") }
     val uiPrefs = remember { context.getSharedPreferences("moka_ui", Context.MODE_PRIVATE) }
     var onboardingSeen by rememberSaveable { mutableStateOf(uiPrefs.getBoolean("onboarding_seen", false)) }
+    // Keep the remote library session while moving between Library, Now Playing, and DSP.
+    val networkLibrary = remember(context) { NetworkLibraryState(context.applicationContext) }
 
     LaunchedEffect(openNowPlayingRequest) {
         if (openNowPlayingRequest > 0) page = 0
@@ -173,7 +175,7 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when {
-                !hasPermission -> PermissionScreen { launcher.launch(permission) }
+                !hasPermission && page != 1 -> PermissionScreen { launcher.launch(permission) }
                 page == 0 -> NowPlayingScreen(state, viewModel)
                 page == 1 -> LibraryScreen(
                     tracks = state.tracks,
@@ -191,7 +193,11 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                     onPlayQueue = viewModel::playQueue,
                     onPlayNext = viewModel::playNext,
                     onAddToQueue = viewModel::addToQueue,
-                    onToggleFavorite = viewModel::toggleFavorite
+                    onToggleFavorite = viewModel::toggleFavorite,
+                    networkLibrary = networkLibrary,
+                    onPlayNetwork = viewModel::playNetworkTrack,
+                    localPermissionGranted = hasPermission,
+                    onRequestLocalPermission = { launcher.launch(permission) }
                 )
                 page == 2 -> SearchScreen(
                     state.tracks,
@@ -288,7 +294,11 @@ private fun LibraryScreen(
     onPlayQueue: (List<MusicTrack>, Boolean) -> Unit,
     onPlayNext: (MusicTrack) -> Unit,
     onAddToQueue: (MusicTrack) -> Unit,
-    onToggleFavorite: (MusicTrack) -> Unit
+    onToggleFavorite: (MusicTrack) -> Unit,
+    networkLibrary: NetworkLibraryState,
+    onPlayNetwork: (com.mokamusic.player.network.NetworkSong, android.net.Uri) -> Unit,
+    localPermissionGranted: Boolean,
+    onRequestLocalPermission: () -> Unit
 ) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var selectedCollection by rememberSaveable { mutableStateOf<String?>(null) }
@@ -331,19 +341,24 @@ private fun LibraryScreen(
                 Text("Moka", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
                 Text("${tracks.size} tracks · ${albumGroups.size} albums · ${artistGroups.size} artists · ${genreGroups.size} genres")
             }
-            IconButton(onClick = onRescan, enabled = !isScanning) {
+            IconButton(onClick = onRescan, enabled = !isScanning && localPermissionGranted && tab != 4) {
                 if (isScanning) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                 else Icon(Icons.Default.Refresh, "Refresh library", tint = MaterialTheme.colorScheme.primary)
             }
         }
 
-        PrimaryTabRow(selectedTabIndex = tab) {
-            listOf("Tracks", "Albums", "Artists", "Genres").forEachIndexed { index, title ->
+        PrimaryScrollableTabRow(selectedTabIndex = tab, edgePadding = 0.dp) {
+            listOf("Tracks", "Albums", "Artists", "Genres", "Network").forEachIndexed { index, title ->
                 Tab(selected = tab == index, onClick = { tab = index }, text = { Text(title) })
             }
         }
 
-        if (isScanning) {
+        if (!localPermissionGranted && tab != 4) {
+            PermissionScreen(onGrant = onRequestLocalPermission)
+            return@Column
+        }
+
+        if (isScanning && tab != 4) {
             val progress = if (scanTotal > 0) scanCompleted.toFloat() / scanTotal.toFloat() else 0f
             LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
             Text(
@@ -441,6 +456,10 @@ private fun LibraryScreen(
                 onClick = { entry ->
                     selectedCollection = encodeCollection(LibraryCollectionType.GENRE, entry.key, entry.key)
                 }
+            )
+            4 -> NetworkLibraryScreen(
+                state = networkLibrary,
+                onPlay = onPlayNetwork
             )
         }
     }
@@ -1466,7 +1485,6 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
         item { MetadataDisplayPreferenceCard(state, viewModel) }
         item { MetadataEnrichmentCard(state, viewModel) }
         item { LoudnessAnalysisCard(state, viewModel) }
-        item { NetworkLibraryCard(viewModel::playNetworkTrack) }
 
         item { SectionLabel("ADVANCED") }
         item {
