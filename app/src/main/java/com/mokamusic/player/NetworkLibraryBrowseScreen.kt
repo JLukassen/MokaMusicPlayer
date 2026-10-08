@@ -1,6 +1,5 @@
 package com.mokamusic.player
 
-import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,14 +26,26 @@ import com.mokamusic.player.network.NetworkGenre
 @Composable
 internal fun NetworkLibraryScreen(
     state: NetworkLibraryState,
-    onPlay: (NetworkSong, Uri) -> Unit,
+    onPlay: (NetworkSong, List<NetworkSong>, Boolean) -> Unit,
     onOpenSettings: () -> Unit
 ) {
     LaunchedEffect(state) { state.onScreenOpened() }
     var sortMode by remember { mutableStateOf("Name A-Z") }
     var sortMenu by remember { mutableStateOf(false) }
 
-    Column(Modifier.fillMaxSize()) {
+    if (state.client == null) {
+        Column(Modifier.fillMaxSize().padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Navidrome", style = MaterialTheme.typography.titleLarge)
+            Text("Connect in Settings to browse your network music.")
+            Button(onClick = onOpenSettings) { Text("Set up Navidrome in Settings") }
+        }
+        return
+    }
+
+    // These controls live inside each scrolling list: swiping up reveals more songs.
+    val header: @Composable () -> Unit = {
+        Column {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -55,17 +66,6 @@ internal fun NetworkLibraryScreen(
             Text(it, modifier = Modifier.padding(horizontal = 16.dp, vertical = 3.dp),
                 style = MaterialTheme.typography.bodySmall)
         }
-        if (state.client == null) {
-            Column(
-                Modifier.fillMaxSize().padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Text("Connect to your Navidrome server in Settings to browse your music.")
-                Button(onClick = onOpenSettings) { Text("Set up Navidrome in Settings") }
-            }
-            return@Column
-        }
-
         PrimaryScrollableTabRow(selectedTabIndex = state.category, edgePadding = 0.dp) {
             listOf("Tracks", "Albums", "Artists", "Genres").forEachIndexed { index, label ->
                 Tab(selected = state.category == index, text = { Text(label) },
@@ -120,24 +120,33 @@ internal fun NetworkLibraryScreen(
             }
         }
 
+        }
+    }
+
+    Column(Modifier.fillMaxSize()) {
         if (state.selectedAlbum != null) {
-            NetworkBackHeader(
-                state.selectedAlbum?.name.orEmpty(),
-                onBack = state::backToAlbums
-            )
             val sorted = sortSongs(state.songs, sortMode)
             LazyColumn(Modifier.fillMaxSize()) {
+                item(key = "controls") { header() }
+                item(key = "back") {
+                    NetworkBackHeader(state.selectedAlbum?.name.orEmpty(),
+                        onBack = state::backToAlbums)
+                }
+                item(key = "queue-actions") { NetworkQueueActions(sorted, onPlay) }
                 items(sorted, key = { it.id }) { song ->
-                    NetworkSongRow(song, state, onPlay)
+                    NetworkSongRow(song, state, onPlay, sorted)
                 }
             }
             return@Column
         }
         if (state.selectedArtist != null) {
-            NetworkBackHeader(state.selectedArtist?.name.orEmpty(),
-                onBack = state::backFromArtist)
             val selectedAlbums = sortAlbums(state.artistAlbums, sortMode)
             LazyColumn(Modifier.fillMaxSize()) {
+                item(key = "controls") { header() }
+                item(key = "back") {
+                    NetworkBackHeader(state.selectedArtist?.name.orEmpty(),
+                        onBack = state::backFromArtist)
+                }
                 items(selectedAlbums, key = { it.id }) { album ->
                     NetworkAlbumRow(album, state)
                 }
@@ -145,11 +154,16 @@ internal fun NetworkLibraryScreen(
             return@Column
         }
         if (state.selectedGenre != null) {
-            NetworkBackHeader(state.selectedGenre?.name.orEmpty(),
-                onBack = state::backFromGenre)
+            val sorted = sortSongs(state.genreSongs, sortMode)
             LazyColumn(Modifier.fillMaxSize()) {
-                items(sortSongs(state.genreSongs, sortMode), key = { it.id }) { song ->
-                    NetworkSongRow(song, state, onPlay)
+                item(key = "controls") { header() }
+                item(key = "back") {
+                    NetworkBackHeader(state.selectedGenre?.name.orEmpty(),
+                        onBack = state::backFromGenre)
+                }
+                item(key = "queue-actions") { NetworkQueueActions(sorted, onPlay) }
+                items(sorted, key = { it.id }) { song ->
+                    NetworkSongRow(song, state, onPlay, sorted)
                 }
                 if (state.hasMoreGenreSongs) {
                     item {
@@ -169,6 +183,10 @@ internal fun NetworkLibraryScreen(
                 val tracks = if (state.activeTrackSearch.isNotBlank())
                     state.searchedTracks else state.browsedTracks
                 val sorted = sortSongs(tracks, sortMode)
+                LazyColumn(Modifier.fillMaxSize()) {
+                    item(key = "controls") { header() }
+                    item(key = "queue-actions") { NetworkQueueActions(sorted, onPlay) }
+                    item(key = "count") {
                 Text(
                     if (state.activeTrackSearch.isNotBlank())
                         "Matching tracks from Navidrome"
@@ -177,9 +195,9 @@ internal fun NetworkLibraryScreen(
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                 )
-                LazyColumn(Modifier.fillMaxSize()) {
+                    }
                     items(sorted, key = { it.id }) { song ->
-                        NetworkSongRow(song, state, onPlay)
+                        NetworkSongRow(song, state, onPlay, sorted)
                     }
                     if (state.activeTrackSearch.isNotBlank() && state.hasMoreSearch) {
                         item {
@@ -209,6 +227,7 @@ internal fun NetworkLibraryScreen(
                         it.artist.contains(state.search, true)
                 }
                 LazyColumn(Modifier.fillMaxSize()) {
+                    item(key = "controls") { header() }
                     items(sortAlbums(filtered, sortMode), key = { it.id }) { album ->
                         NetworkAlbumRow(album, state)
                     }
@@ -227,6 +246,7 @@ internal fun NetworkLibraryScreen(
                     state.search.isBlank() || it.name.contains(state.search, true)
                 }
                 LazyColumn(Modifier.fillMaxSize()) {
+                    item(key = "controls") { header() }
                     items(sortArtists(filtered, sortMode), key = { it.id }) { artist ->
                         ListItem(
                             modifier = Modifier.clickable(enabled = !state.busy) {
@@ -252,6 +272,7 @@ internal fun NetworkLibraryScreen(
                     state.search.isBlank() || it.name.contains(state.search, true)
                 }
                 LazyColumn(Modifier.fillMaxSize()) {
+                    item(key = "controls") { header() }
                     items(sortGenres(filtered, sortMode), key = { it.name }) { genre ->
                         ListItem(
                             modifier = Modifier.clickable(enabled = !state.busy) {
@@ -308,13 +329,33 @@ private fun NetworkAlbumRow(album: NetworkAlbum, state: NetworkLibraryState) {
 }
 
 @Composable
+private fun NetworkQueueActions(
+    songs: List<NetworkSong>,
+    onPlay: (NetworkSong, List<NetworkSong>, Boolean) -> Unit
+) {
+    if (songs.isEmpty()) return
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        OutlinedButton(onClick = { onPlay(songs.first(), songs, false) }) {
+            Text("Play all · ${songs.size}")
+        }
+        Button(onClick = { onPlay(songs.random(), songs, true) }) {
+            Text("Shuffle · ${songs.size}")
+        }
+    }
+}
+
+@Composable
 private fun NetworkSongRow(
     song: NetworkSong, state: NetworkLibraryState,
-    onPlay: (NetworkSong, Uri) -> Unit
+    onPlay: (NetworkSong, List<NetworkSong>, Boolean) -> Unit,
+    queue: List<NetworkSong>
 ) {
     ListItem(
         modifier = Modifier.clickable(enabled = !state.busy) {
-            state.client?.let { onPlay(song, it.streamUri(song.id)) }
+            onPlay(song, queue, false)
         },
         headlineContent = {
             Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
