@@ -190,6 +190,34 @@ class SubsonicLibraryClientTest {
         assertFalse(failure.message.orEmpty().contains("/rest/"))
     }
 
+    @Test fun streamedAudioProbeReadsOnlyFirstBytesUsingRange() {
+        val requested = mutableListOf<URL>()
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            requested += url
+            FakeHttps(url, "fLaC\\u0000example-audio", 206)
+        }
+        val result = client.checkStream("audio123")
+        assertTrue(result.playable)
+        assertTrue(result.message.contains("206"))
+        assertEquals(1, requested.size)
+        assertTrue(requested.single().path.endsWith("/stream.view"))
+        assertTrue(requested.single().query.contains("id=audio123"))
+    }
+
+    @Test fun streamProbeRejectsHtmlAndReportsAudioPermissionFailure() {
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            FakeHttps(url, "<html>login</html>")
+        }
+        val result = client.checkStream("audio123")
+        assertFalse(result.playable)
+        assertTrue(result.message.contains("instead of audio"))
+        val denied = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            FakeHttps(url, "", 403)
+        }
+        val error = assertThrows(SubsonicHttpException::class.java) { denied.checkStream("audio123") }
+        assertEquals(403, error.statusCode)
+    }
+
     @Test fun blankSearchDoesNotCallServer() {
         val client = SubsonicLibraryClient("https://fedora.example.ts.net", "u", "pw") {
             error("Blank query should never call server")
