@@ -1423,7 +1423,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 )
                 Spacer(Modifier.width(16.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Moka 4.0 Beta 5", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                    Text("Moka 4.0 Beta 6 · dev", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                     Text("v$versionName · Local-first hi-fi", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                     Text("Music first. DSP when you want it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
