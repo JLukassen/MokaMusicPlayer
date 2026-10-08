@@ -100,6 +100,9 @@ data class MokaUiState(
 )
 
 class MokaViewModel(application: Application) : AndroidViewModel(application) {
+    // Connection work is tied to the ViewModel, not to the Composable Network tab.
+    // Navigating away cannot cancel an in-flight request or discard the session.
+    val networkLibrary = NetworkLibraryState(application, viewModelScope)
     private val repository = MusicLibraryRepository(application)
     private val technicalReader = AudioTechnicalMetadataReader(application)
     private val outputInspector = AudioOutputInspector(application)
