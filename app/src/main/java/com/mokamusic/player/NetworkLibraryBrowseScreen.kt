@@ -9,6 +9,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -61,6 +62,9 @@ internal fun NetworkLibraryScreen(
                     else "Private network music · " + state.albums.size + " albums loaded",
                     style = MaterialTheme.typography.bodySmall
                 )
+            }
+            IconButton(onClick = state::refresh, enabled = !state.busy) {
+                Icon(Icons.Default.Refresh, contentDescription = "Refresh Navidrome tracks and albums")
             }
             TextButton(onClick = onOpenSettings) { Text("Account settings") }
         }
@@ -195,7 +199,8 @@ internal fun NetworkLibraryScreen(
                     if (state.activeTrackSearch.isNotBlank())
                         "Matching tracks from Navidrome"
                     else "Loaded " + sorted.size + " tracks from " +
-                        state.trackAlbumCursor + " albums · more available in batches",
+                        state.trackAlbumCursor + " albums" +
+                        if (state.trackBrowsingComplete) " · All tracks loaded" else " · Scroll for more",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                 )
@@ -224,7 +229,7 @@ internal fun NetworkLibraryScreen(
                                 enabled = !state.busy,
                                 onClick = state::loadTrackBatch,
                                 modifier = Modifier.fillMaxWidth().padding(16.dp)
-                            ) { Text("Load more tracks") }
+                            ) { Text(if (state.trackBatchFailed) "Retry loading tracks" else "Load more tracks") }
                         }
                     }
                 }
@@ -248,7 +253,7 @@ internal fun NetworkLibraryScreen(
                             OutlinedButton(
                                 onClick = state::loadMore, enabled = !state.busy,
                                 modifier = Modifier.fillMaxWidth().padding(16.dp)
-                            ) { Text("Load more albums") }
+                            ) { Text(if (state.albumBatchFailed) "Retry loading albums" else "Load more albums") }
                         }
                     }
                 }
