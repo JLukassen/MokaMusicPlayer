@@ -30,19 +30,26 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Kept at MokaApp scope so switching Library tabs or opening Now Playing
- * does not discard the active Subsonic session and force another login.
- * Only server URL and username are persisted. Password stays in memory
- * inside the active client and is dropped on disconnect/process death.
+ * Lives in MokaViewModel instead of transient Composable state.
+ * Server URL and username persist as typed; an optional encrypted password
+ * is kept with Android Keystore outside of backup files.
  */
 @Stable
-internal class NetworkLibraryState(context: Context) {
+internal class NetworkLibraryState(
+    context: Context,
+    private val appScope: kotlinx.coroutines.CoroutineScope
+) {
     private val prefs = context.applicationContext
         .getSharedPreferences("moka_network_library", Context.MODE_PRIVATE)
 
+    private val credentialStore = com.mokamusic.player.network.NetworkCredentialStore(context)
     var server by mutableStateOf(prefs.getString("server_url", "").orEmpty())
+        private set
     var username by mutableStateOf(prefs.getString("username", "").orEmpty())
+        private set
     var password by mutableStateOf("")
+    var rememberLogin by mutableStateOf(prefs.getBoolean("remember_login", true))
+        private set
     var search by mutableStateOf("")
 
     var client by mutableStateOf<SubsonicLibraryClient?>(null)
@@ -60,13 +67,60 @@ internal class NetworkLibraryState(context: Context) {
     var hasMoreAlbums by mutableStateOf(false)
         private set
     private var nextAlbumOffset = 0
+    private var autoReconnectAttempted = false
 
-    suspend fun connect() {
-        if (busy || server.isBlank() || username.isBlank() || password.isBlank()) return
+    val savedLoginAvailable: Boolean
+        get() = credentialStore.isSaved() &&
+            prefs.getString("saved_server_url", null) == server.trim().trimEnd('/') &&
+            prefs.getString("saved_username", null) == username.trim()
+
+    fun setServer(value: String) {
+        server = value
+        prefs.edit().putString("server_url", value).apply()
+    }
+
+    fun setUsername(value: String) {
+        username = value
+        prefs.edit().putString("username", value).apply()
+    }
+
+    fun setRememberLogin(value: Boolean) {
+        rememberLogin = value
+        prefs.edit().putBoolean("remember_login", value).apply()
+        if (!value) clearSavedLogin()
+    }
+
+    fun onScreenOpened() {
+        if (autoReconnectAttempted) return
+        autoReconnectAttempted = true
+        if (client == null && savedLoginAvailable) connect()
+    }
+
+    fun connect() {
+        if (busy || client != null) return
+        appScope.launch { connectInternal() }
+    }
+
+    private suspend fun connectInternal() {
+        if (busy) return
         busy = true
         status = "Connecting…"
         try {
-            val candidate = SubsonicLibraryClient(server, username, password)
+            val target = server.trim().trimEnd('/')
+            val account = username.trim()
+            val secret = if (password.isNotBlank()) password else {
+                withContext(Dispatchers.IO) {
+                    if (!savedLoginAvailable) null
+                    else credentialStore.load()?.takeIf {
+                        it.server == target && it.username == account
+                    }?.password
+                }
+            }
+            if (target.isBlank() || account.isBlank() || secret.isNullOrBlank()) {
+                status = "Enter your password. The saved login may no longer be available."
+                return
+            }
+            val candidate = SubsonicLibraryClient(target, account, secret)
             val first = withContext(Dispatchers.IO) {
                 candidate.ping()
                 candidate.albums(offset = 0, size = PAGE_SIZE)
@@ -77,20 +131,41 @@ internal class NetworkLibraryState(context: Context) {
             songs = emptyList()
             hasMoreAlbums = first.size == PAGE_SIZE
             nextAlbumOffset = first.size
+            setServer(target)
+            setUsername(account)
+            val saved = if (rememberLogin) {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        credentialStore.save(
+                            com.mokamusic.player.network.SavedNetworkLogin(target, account, secret)
+                        )
+                    }
+                    prefs.edit().putString("saved_server_url", target)
+                        .putString("saved_username", account).apply()
+                }.isSuccess
+            } else false
             password = ""
-            prefs.edit().putString("server_url", server.trim())
-                .putString("username", username.trim()).apply()
-            status = if (first.isEmpty()) "Connected, but the server returned no albums."
+            val message = if (first.isEmpty()) "Connected, but the server returned no albums."
                      else "Connected · ${albums.size} albums"
-        } catch (e: Exception) {
-            // Avoid displaying raw request URLs containing Subsonic authentication tokens.
-            status = "Connection failed. Check the HTTPS address, login and server access."
+            status = if (rememberLogin && !saved) {
+                "$message · Login wasn't saved (device keystore unavailable)."
+            } else message
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Do not expose Subsonic token/salt URLs or passwords in the UI.
+            status = "Connection failed. Check HTTPS, login and server access."
         } finally {
             busy = false
         }
     }
 
-    suspend fun refresh() {
+    fun refresh() {
+        if (busy || client == null) return
+        appScope.launch { refreshInternal() }
+    }
+
+    private suspend fun refreshInternal() {
         val active = client ?: return
         if (busy) return
         busy = true
@@ -108,7 +183,12 @@ internal class NetworkLibraryState(context: Context) {
         }
     }
 
-    suspend fun loadMore() {
+    fun loadMore() {
+        if (busy || client == null || !hasMoreAlbums) return
+        appScope.launch { loadMoreInternal() }
+    }
+
+    private suspend fun loadMoreInternal() {
         val active = client ?: return
         if (busy || !hasMoreAlbums) return
         busy = true
@@ -129,7 +209,12 @@ internal class NetworkLibraryState(context: Context) {
         }
     }
 
-    suspend fun openAlbum(album: NetworkAlbum) {
+    fun openAlbum(album: NetworkAlbum) {
+        if (busy || client == null) return
+        appScope.launch { openAlbumInternal(album) }
+    }
+
+    private suspend fun openAlbumInternal(album: NetworkAlbum) {
         val active = client ?: return
         if (busy) return
         busy = true
@@ -153,6 +238,7 @@ internal class NetworkLibraryState(context: Context) {
     }
 
     fun disconnect() {
+        autoReconnectAttempted = true
         client = null
         password = ""
         selectedAlbum = null
@@ -161,7 +247,22 @@ internal class NetworkLibraryState(context: Context) {
         hasMoreAlbums = false
         nextAlbumOffset = 0
         search = ""
-        status = "Disconnected"
+        status = "Disconnected. Saved login is retained."
+    }
+
+    fun forgetServer() {
+        disconnect()
+        clearSavedLogin()
+        server = ""
+        username = ""
+        password = ""
+        prefs.edit().remove("server_url").remove("username").apply()
+        status = "Server address and saved login forgotten."
+    }
+
+    private fun clearSavedLogin() {
+        credentialStore.clear()
+        prefs.edit().remove("saved_server_url").remove("saved_username").apply()
     }
 
     companion object {
