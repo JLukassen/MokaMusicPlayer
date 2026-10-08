@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -23,8 +24,8 @@ import kotlinx.coroutines.withContext
 
 /**
  * Duplicate removal is only offered after a full SHA-256 match.
- * Each selection requires two distinct actions: Moka's review dialog and Android's
- * system MediaStore deletion consent. No automatic or bulk deletion.
+ * People explicitly check the copies they want to remove. A validated batch leaves
+ * at least one file per group. Moka reviews the selection, then Android asks consent.
  */
 @Composable
 internal fun LibraryAuditCard(
@@ -38,7 +39,8 @@ internal fun LibraryAuditCard(
     var review by remember { mutableStateOf<DuplicateReview?>(null) }
     var busy by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
-    var pendingDelete by remember { mutableStateOf<MusicTrack?>(null) }
+    var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var pendingDelete by remember { mutableStateOf<List<MusicTrack>?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     val deleteLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
@@ -46,6 +48,7 @@ internal fun LibraryAuditCard(
         if (response.resultCode == Activity.RESULT_OK) {
             report = null
             review = null
+            selectedIds = emptySet()
             notice = "Android approved deletion. Refreshing library."
             onLibraryChanged()
         } else {
@@ -56,32 +59,48 @@ internal fun LibraryAuditCard(
     LaunchedEffect(tracks) {
         review = null
         report = null
+        selectedIds = emptySet()
+        pendingDelete = null
     }
 
-    pendingDelete?.let { target ->
+    pendingDelete?.let { targets ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("Delete this verified duplicate?") },
+            title = { Text("Delete ${targets.size} selected file(s)?") },
             text = {
-                Text(
-                    "Remove only this copy?\\n\\n" +
-                        "${target.artist} — ${target.title}\\n" +
-                        "${target.relativePath.orEmpty()}${target.displayName}\\n\\n" +
-                        "Confirm the file again in Android's system dialog. " +
-                        "This may permanently remove it; it is not an automatic cleanup."
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Review the precise files to remove. Other copies are preserved. " +
+                        "Deletion may be permanent; Android will ask for final permission.")
+                    Column(
+                        modifier = Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        targets.forEach { track ->
+                            Text("${track.artist} — ${track.title}", fontWeight = FontWeight.SemiBold)
+                            Text("${track.relativePath.orEmpty()}${track.displayName}",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
+                    val groups = review?.exact?.map { group -> group.tracks.map { it.id } }.orEmpty()
+                    val confirmedIds = targets.map { it.id }.toSet()
                     pendingDelete = null
-                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    if (confirmedIds != selectedIds ||
+                        !DuplicateSelectionPolicy.valid(groups, confirmedIds)) {
+                        notice = "Selection changed. Run the deep scan and choose files again."
+                    } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                         notice = "Deletion requires Android 11 or later in this beta."
                     } else {
                         runCatching {
-                            val permission = MediaStore.createDeleteRequest(
-                                context.contentResolver, listOf(target.uri)
+                            val request = MediaStore.createDeleteRequest(
+                                context.contentResolver, targets.map { it.uri }
                             )
-                            deleteLauncher.launch(IntentSenderRequest.Builder(permission.intentSender).build())
+                            deleteLauncher.launch(
+                                IntentSenderRequest.Builder(request.intentSender).build()
+                            )
                         }.onFailure { error ->
                             notice = "Unable to request deletion: ${error.message}"
                         }
@@ -89,7 +108,7 @@ internal fun LibraryAuditCard(
                 }) { Text("Continue to Android confirmation") }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("Keep file") }
+                TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
             }
         )
     }
@@ -118,6 +137,7 @@ internal fun LibraryAuditCard(
             Button(enabled = !busy && tracks.isNotEmpty(), onClick = {
                 busy = true
                 review = null
+                selectedIds = emptySet()
                 notice = null
                 progress = null
                 scope.launch {
@@ -163,6 +183,9 @@ internal fun LibraryAuditCard(
             }
 
             review?.let { result ->
+                val groups = result.exact.map { group -> group.tracks.map { it.id } }
+                val selectedTracks = result.exact.flatMap { it.tracks }
+                    .filter { it.id in selectedIds }
                 val confirmed = result.exact.sumOf { it.tracks.size - 1 }
                 Text("${result.exact.size} exact duplicate groups · ${confirmed} extra copies",
                     fontWeight = FontWeight.Bold)
@@ -180,14 +203,40 @@ internal fun LibraryAuditCard(
                             fontWeight = FontWeight.SemiBold)
                         Text("SHA-256 ${group.sha256.take(16)}…", style = MaterialTheme.typography.bodySmall)
                         group.tracks.forEach { track ->
-                            Text("${track.artist} — ${track.title}")
-                            Text("${track.relativePath.orEmpty()}${track.displayName}",
-                                style = MaterialTheme.typography.bodySmall)
-                            OutlinedButton(
-                                enabled = !busy && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
-                                onClick = { pendingDelete = track }
-                            ) { Text("Review deleting this copy") }
+                            val checked = track.id in selectedIds
+                            val allowed = !busy && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                                (checked || DuplicateSelectionPolicy.canSelect(
+                                    groups, selectedIds, track.id
+                                ))
+                            Row(
+                                modifier = Modifier.fillMaxWidth().selectable(
+                                    selected = checked,
+                                    enabled = allowed,
+                                    onClick = {
+                                        selectedIds = if (checked) selectedIds - track.id
+                                            else selectedIds + track.id
+                                    }
+                                ),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = checked,
+                                    onCheckedChange = null,
+                                    enabled = allowed
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("${track.artist} — ${track.title}")
+                                    Text("${track.relativePath.orEmpty()}${track.displayName}",
+                                        style = MaterialTheme.typography.bodySmall)
+                                    Text("${track.formatLabel} · ${track.sizeBytes} bytes",
+                                        style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
                         }
+                        Text(
+                            "Select copies to delete. At least one is kept in this group.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
                         HorizontalDivider()
                     }
                     if (result.possible.isNotEmpty()) {
@@ -200,11 +249,28 @@ internal fun LibraryAuditCard(
                         if (result.possible.size > 30) Text("Showing first 30 possible groups")
                     }
                 }
+                if (result.exact.isNotEmpty()) {
+                    Text("${selectedIds.size} selected for deletion (max " +
+                        "${DuplicateSelectionPolicy.MAX_FILES_PER_REQUEST} per request)",
+                        fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            enabled = !busy && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                                DuplicateSelectionPolicy.valid(groups, selectedIds),
+                            onClick = { pendingDelete = selectedTracks.toList() }
+                        ) { Text("Review & delete ${selectedIds.size} selected") }
+                        OutlinedButton(
+                            enabled = selectedIds.isNotEmpty(),
+                            onClick = { selectedIds = emptySet() }
+                        ) { Text("Clear selection") }
+                    }
+                }
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R)
                     Text("Deletion is disabled on Android 10 and earlier in this beta.")
                 Text(
-                    "Only files proven identical byte-for-byte can be selected for deletion. " +
-                        "The system asks for permission for each file. Never delete your only copy.",
+                    "Only byte-for-byte verified duplicates can be selected. Unverified matches " +
+                        "are read-only suggestions. Moka never auto-selects or deletes files; " +
+                        "Android requests permission for your chosen batch.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
