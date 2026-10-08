@@ -102,11 +102,17 @@ Do **not** run `tailscale funnel`, which would expose the service publicly.
 
 ## 5. Connect and test
 
-In Moka Beta 6.1 → Settings → Network music · experimental:
+In Moka Beta 6.1 → Library → Network tab:
 
 - Server HTTPS URL: the complete `https://...ts.net` address (no `/rest` path).
 - Username/password: Navidrome user created in Step 3.
-- Tap Connect → browse albums → select a track for playback.
+- Tap Connect → browse full-height albums → open an album → select a track for playback.
+- You can search loaded albums by name or artist, load additional album pages and refresh.
+- The connection remains active while switching between Library and Now Playing until
+  you disconnect or Moka's process is terminated. The HTTPS URL and username are
+  remembered; no password is stored to disk.
+- Network music is no longer confined to the Settings card; the Library's
+  Tracks/Albums/Artists/Genres tabs remain local.
 
 Until the APK can launch on a test device, a Fedora Python Subsonic smoke test
 can verify authentication, album/song endpoints and partial audio streaming
