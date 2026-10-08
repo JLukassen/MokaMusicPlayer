@@ -180,7 +180,11 @@ class SubsonicLibraryClient(
             val status = connection.responseCode
             if (status !in 200..299) throw SubsonicHttpException(status)
             val type = connection.contentType.orEmpty().substringBefore(';').trim().lowercase()
-            val firstBytes = connection.inputStream.use { it.readNBytes(32) }
+            val firstBytes = connection.inputStream.use { input ->
+                val sample = ByteArray(32)
+                val count = input.read(sample)
+                if (count > 0) sample.copyOf(count) else byteArrayOf()
+            }
             val text = firstBytes.toString(Charsets.US_ASCII).trimStart()
             val looksLikeJsonOrHtml = type.contains("json") || type.contains("html") ||
                 text.startsWith("{") || text.startsWith("<")
