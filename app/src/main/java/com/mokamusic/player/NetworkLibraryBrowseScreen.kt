@@ -200,7 +200,7 @@ internal fun NetworkLibraryScreen(
                         "Matching tracks from Navidrome"
                     else "Loaded " + sorted.size + " tracks from " +
                         state.trackAlbumCursor + " albums" +
-                        if (state.trackBrowsingComplete) " · All tracks loaded" else " · Scroll for more",
+                        (if (state.trackBrowsingComplete) " · All tracks loaded" else " · Scroll for more"),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                 )
