@@ -23,9 +23,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Duplicate removal is only offered after a full SHA-256 match.
- * People explicitly check the copies they want to remove. A validated batch leaves
- * at least one file per group. Moka reviews the selection, then Android asks consent.
+ * Explicit deletion of verified copies or suspected duplicates (never automatic).
+ * Suspected matches carry a separate confirmation, since MP3/FLAC versions may differ.
+ * Every candidate group must retain one track; Android always requests deletion consent.
  */
 @Composable
 internal fun LibraryAuditCard(
@@ -41,6 +41,7 @@ internal fun LibraryAuditCard(
     var progress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var pendingDelete by remember { mutableStateOf<List<MusicTrack>?>(null) }
+    var acknowledgeUnverified by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     val deleteLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
@@ -64,6 +65,8 @@ internal fun LibraryAuditCard(
     }
 
     pendingDelete?.let { targets ->
+        val verifiedIds = review?.exact.orEmpty().flatMap { it.tracks }.map { it.id }.toSet()
+        val unverified = targets.filter { it.id !in verifiedIds }
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("Delete ${targets.size} selected file(s)?") },
@@ -71,6 +74,26 @@ internal fun LibraryAuditCard(
                 Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Review the precise files to remove. Other copies are preserved. " +
                         "Deletion may be permanent; Android will ask for final permission.")
+                    if (unverified.isNotEmpty()) {
+                        Text(
+                            "${unverified.size} selected track(s) are SUSPECTED matches only. " +
+                                "They are NOT confirmed identical. Different encodings, masters " +
+                                "and recordings may contain unique audio; keep your preferred copy.",
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = acknowledgeUnverified,
+                                onCheckedChange = { acknowledgeUnverified = it }
+                            )
+                            Text(
+                                "I reviewed these suspected tracks and want to remove my " +
+                                    "selected files despite the risk.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
                     Column(
                         modifier = Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(7.dp)
@@ -85,12 +108,18 @@ internal fun LibraryAuditCard(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val groups = review?.exact?.map { group -> group.tracks.map { it.id } }.orEmpty()
+                    val groups = review?.let { inspected ->
+                        inspected.exact.map { group -> group.tracks.map { it.id } } +
+                            inspected.possible.map { group -> group.map { it.id } }
+                    }.orEmpty()
                     val confirmedIds = targets.map { it.id }.toSet()
+                    val missingWarning = unverified.isNotEmpty() && !acknowledgeUnverified
                     pendingDelete = null
                     if (confirmedIds != selectedIds ||
                         !DuplicateSelectionPolicy.valid(groups, confirmedIds)) {
                         notice = "Selection changed. Run the deep scan and choose files again."
+                    } else if (missingWarning) {
+                        notice = "Confirm the warning for suspected matches before deleting."
                     } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                         notice = "Deletion requires Android 11 or later in this beta."
                     } else {
@@ -105,7 +134,9 @@ internal fun LibraryAuditCard(
                             notice = "Unable to request deletion: ${error.message}"
                         }
                     }
-                }) { Text("Continue to Android confirmation") }
+                }, enabled = unverified.isEmpty() || acknowledgeUnverified) {
+                    Text("Continue to Android confirmation")
+                }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
@@ -138,6 +169,7 @@ internal fun LibraryAuditCard(
                 busy = true
                 review = null
                 selectedIds = emptySet()
+                acknowledgeUnverified = false
                 notice = null
                 progress = null
                 scope.launch {
@@ -183,9 +215,13 @@ internal fun LibraryAuditCard(
             }
 
             review?.let { result ->
-                val groups = result.exact.map { group -> group.tracks.map { it.id } }
-                val selectedTracks = result.exact.flatMap { it.tracks }
+                val groups = result.exact.map { group -> group.tracks.map { it.id } } +
+                    result.possible.map { group -> group.map { it.id } }
+                val verifiedIds = result.exact.flatMap { it.tracks }.map { it.id }.toSet()
+                val selectedTracks = (result.exact.flatMap { it.tracks } +
+                    result.possible.flatten()).distinctBy { it.uri.toString() }
                     .filter { it.id in selectedIds }
+                val unverifiedCount = selectedTracks.count { it.id !in verifiedIds }
                 val confirmed = result.exact.sumOf { it.tracks.size - 1 }
                 Text("${result.exact.size} exact duplicate groups · ${confirmed} extra copies",
                     fontWeight = FontWeight.Bold)
@@ -240,24 +276,73 @@ internal fun LibraryAuditCard(
                         HorizontalDivider()
                     }
                     if (result.possible.isNotEmpty()) {
-                        Text("${result.possible.size} possible matches (not verified)",
+                        Text("${result.possible.size} possible match groups (NOT verified)",
                             fontWeight = FontWeight.SemiBold)
-                        result.possible.take(30).forEach { group ->
-                            Text(group.joinToString(" / ") { it.displayName },
-                                style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "These tracks may NOT be the same recording. Review the formats, " +
+                                "paths and filenames yourself before choosing any files to remove.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        result.possible.take(30).forEachIndexed { index, group ->
+                            Text("Suspected group ${index + 1}",
+                                fontWeight = FontWeight.SemiBold)
+                            group.forEach { track ->
+                                val checked = track.id in selectedIds
+                                val allowed = !busy && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                                    (checked || DuplicateSelectionPolicy.canSelect(
+                                        groups, selectedIds, track.id
+                                    ))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().selectable(
+                                        selected = checked,
+                                        enabled = allowed,
+                                        onClick = {
+                                            selectedIds = if (checked) selectedIds - track.id
+                                                else selectedIds + track.id
+                                        }
+                                    ),
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = checked,
+                                        onCheckedChange = null,
+                                        enabled = allowed
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("${track.artist} — ${track.title}")
+                                        Text("${track.relativePath.orEmpty()}${track.displayName}",
+                                            style = MaterialTheme.typography.bodySmall)
+                                        Text("${track.formatLabel} · ${track.sizeBytes} bytes",
+                                            style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            }
+                            HorizontalDivider()
                         }
-                        if (result.possible.size > 30) Text("Showing first 30 possible groups")
+                        if (result.possible.size > 30) Text("Showing first 30 suspected groups")
                     }
                 }
-                if (result.exact.isNotEmpty()) {
+                if (result.exact.isNotEmpty() || result.possible.isNotEmpty()) {
                     Text("${selectedIds.size} selected for deletion (max " +
                         "${DuplicateSelectionPolicy.MAX_FILES_PER_REQUEST} per request)",
                         fontWeight = FontWeight.SemiBold)
+                    if (unverifiedCount > 0) {
+                        Text(
+                            "${unverifiedCount} selected file(s) are only suspected matches. " +
+                                "Deletion needs an extra explicit warning confirmation.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
                             enabled = !busy && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
                                 DuplicateSelectionPolicy.valid(groups, selectedIds),
-                            onClick = { pendingDelete = selectedTracks.toList() }
+                            onClick = {
+                                acknowledgeUnverified = false
+                                pendingDelete = selectedTracks.toList()
+                            }
                         ) { Text("Review & delete ${selectedIds.size} selected") }
                         OutlinedButton(
                             enabled = selectedIds.isNotEmpty(),
@@ -268,9 +353,9 @@ internal fun LibraryAuditCard(
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R)
                     Text("Deletion is disabled on Android 10 and earlier in this beta.")
                 Text(
-                    "Only byte-for-byte verified duplicates can be selected. Unverified matches " +
-                        "are read-only suggestions. Moka never auto-selects or deletes files; " +
-                        "Android requests permission for your chosen batch.",
+                    "Verified copies and suspected matches can both be selected manually. " +
+                        "Suspected matches are NOT proven duplicates. No tracks are preselected; " +
+                        "Android requests deletion permission for your chosen batch.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
