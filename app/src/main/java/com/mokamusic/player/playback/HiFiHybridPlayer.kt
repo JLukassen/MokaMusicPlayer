@@ -61,6 +61,7 @@ class HiFiHybridPlayer(
     private val fallbackListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             if (!directActive && playbackState == Player.STATE_ENDED) {
+                restoreDucking()
                 desiredPlayWhenReady = false
                 focus.abandon()
             }
@@ -140,6 +141,7 @@ class HiFiHybridPlayer(
         startPositionMs: Long
     ): ListenableFuture<*> {
         deactivateDirect(clearMonitor = true)
+        restoreDucking()
         desiredPlayWhenReady = false
         resumeOnFocusGain = false
         focusSuspended = false
@@ -170,6 +172,7 @@ class HiFiHybridPlayer(
         }
         desiredPlayWhenReady = playWhenReady
         if (!playWhenReady) {
+            restoreDucking()
             resumeOnFocusGain = false
             focusSuspended = false
             focus.abandon()
@@ -250,6 +253,7 @@ class HiFiHybridPlayer(
         mainHandler.removeCallbacks(dspReloadRunnable)
         dspStore.unregisterListener(dspPreferenceListener)
         focus.abandon()
+        restoreDucking()
         direct.release()
         fallback.removeListener(fallbackListener)
         AudioPathMonitor.endDirectPath()
@@ -305,6 +309,7 @@ class HiFiHybridPlayer(
 
                 if (after == before || after == C.INDEX_UNSET) {
                     direct.stop()
+                    restoreDucking()
                     desiredPlayWhenReady = false
                     focus.abandon()
                     directState = DirectPcmEngine.State.ENDED
@@ -415,6 +420,7 @@ class HiFiHybridPlayer(
 
     fun pauseForNoisyRoute() {
         focus.abandon()
+        restoreDucking()
         focusSuspended = false
         resumeOnFocusGain = false
         direct.invalidateOutputCache()
