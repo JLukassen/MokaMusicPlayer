@@ -52,7 +52,7 @@ class PlaybackService : MediaLibraryService() {
         val audioOutputProvider = MokaAudioOutputProvider(this)
         val fallback = ExoPlayer.Builder(this, renderersFactory)
             .setAudioOutputProvider(audioOutputProvider)
-            .setAudioAttributes(musicAttributes, true)
+            .setAudioAttributes(musicAttributes, false) // MokaAudioFocusController owns focus for both engines
             .setHandleAudioBecomingNoisy(false) // handled for both engines by this service
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
