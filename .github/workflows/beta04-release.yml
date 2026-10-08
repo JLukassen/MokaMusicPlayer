@@ -2,7 +2,7 @@ name: Beta 4 Android build and tagged APK
 
 on:
   push:
-    branches: [master]
+    branches: [master, beta04-loudness-compat]
   workflow_dispatch:
 
 permissions:
