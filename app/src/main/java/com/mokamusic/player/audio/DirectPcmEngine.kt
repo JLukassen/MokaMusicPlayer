@@ -1389,8 +1389,22 @@ class DirectPcmEngine(
         @Volatile var started = false
             private set
         private val primedSamples = AtomicInteger(0)
+        private val createdAtMs = android.os.SystemClock.elapsedRealtime()
+        private val bluetoothOutput = runCatching {
+            val routeType = track.routedDevice?.type ?: if (Build.VERSION.SDK_INT >= 33) {
+                audioManager.getAudioDevicesForAttributes(mediaAttributes).firstOrNull()?.type
+            } else null
+            routeType.isBluetoothAudio()
+        }.getOrDefault(false)
+        private val primeTargetMs =
+            if (bluetoothOutput) DSP_PRIME_BLUETOOTH_TARGET_MS else DSP_PRIME_TARGET_MS
+        private val primeTargetFrames = minOf(
+            max(DSP_PRIME_MIN_FRAMES, sampleRate * primeTargetMs / 1000),
+            max(DSP_PRIME_MIN_FRAMES, runCatching { track.bufferCapacityInFrames }.getOrDefault(sampleRate * 2) * 2 / 3)
+        )
 
         init {
+            Log.i(AUDIO_LOG_TAG, "DSP pre-roll: target=${primeTargetMs}ms, frames=$primeTargetFrames, bluetooth=$bluetoothOutput")
             worker.priority = Thread.MAX_PRIORITY
             worker.start()
         }
@@ -1488,11 +1502,6 @@ class DirectPcmEngine(
 
         private fun writePacket(samples: FloatArray, packetEpoch: Int) {
             var offset = 0
-            val capacityFrames = runCatching { track.bufferCapacityInFrames }.getOrDefault(sampleRate * 2)
-            val primeTargetFrames = minOf(
-                max(DSP_PRIME_MIN_FRAMES, sampleRate * DSP_PRIME_TARGET_MS / 1000),
-                max(DSP_PRIME_MIN_FRAMES, capacityFrames * 2 / 3)
-            )
             val primeTargetSamples = primeTargetFrames * channels
 
             while (
@@ -1536,6 +1545,7 @@ class DirectPcmEngine(
                             Log.i(
                                 AUDIO_LOG_TAG,
                                 "DSP writer started after ${primed / channels} frames; " +
+                                    "startupMs=${android.os.SystemClock.elapsedRealtime() - createdAtMs} " +
                                     "queue=${queue.size}/$DSP_QUEUE_PACKETS"
                             )
                         }
@@ -1566,6 +1576,9 @@ class DirectPcmEngine(
         private const val DSP_IO_FRAMES = 4096
         private const val DSP_PRIME_MIN_FRAMES = 8_192
         private const val DSP_PRIME_TARGET_MS = 500
+        // Bluetooth adds transport buffering; shorter PCM pre-roll reduces gaps.
+        // Retain an eight-thousand-frame minimum as a cushion against underruns.
+        private const val DSP_PRIME_BLUETOOTH_TARGET_MS = 250
         private const val DSP_QUEUE_PACKETS = 24
         private const val DSP_DRAIN_TIMEOUT_SECONDS = 8L
         private const val NO_SEEK = -1L
