@@ -26,6 +26,8 @@ data class NetworkSong(
 class SubsonicHttpException(val statusCode: Int) :
     IllegalStateException("Navidrome HTTP $statusCode")
 
+data class StreamProbeResult(val playable: Boolean, val message: String)
+
 class SubsonicLibraryClient(
     server: String,
     private val user: String,
@@ -158,6 +160,49 @@ class SubsonicLibraryClient(
     internal fun streamRequestUrl(id: String): String = endpoint(
         "stream", mapOf("id" to id, "format" to "raw")
     )
+
+    /**
+     * Validate the *audio response*, not only ping/catalog permissions. Some Navidrome
+     * installations can list indexed songs even when the container cannot read the
+     * underlying file. Read only a small range; never download an entire song here.
+     * The signed URL is kept private and must never be logged.
+     */
+    fun checkStream(songId: String): StreamProbeResult {
+        val connection = connectionFactory(URL(streamRequestUrl(songId))).apply {
+            connectTimeout = 15_000
+            readTimeout = 25_000
+            instanceFollowRedirects = false
+            setRequestProperty("Range", "bytes=0-255")
+            setRequestProperty("Accept", "audio/*, application/octet-stream")
+            setRequestProperty("User-Agent", "MokaMusicPlayer/4.0")
+        }
+        try {
+            val status = connection.responseCode
+            if (status !in 200..299) throw SubsonicHttpException(status)
+            val type = connection.contentType.orEmpty().substringBefore(';').trim().lowercase()
+            val firstBytes = connection.inputStream.use { it.readNBytes(32) }
+            val text = firstBytes.toString(Charsets.US_ASCII).trimStart()
+            val looksLikeJsonOrHtml = type.contains("json") || type.contains("html") ||
+                text.startsWith("{") || text.startsWith("<")
+            if (looksLikeJsonOrHtml) {
+                return StreamProbeResult(false, "Navidrome returned a web/API response instead of audio.")
+            }
+            val hasAudioHeader = type.startsWith("audio/") ||
+                text.startsWith("fLaC") || text.startsWith("RIFF") ||
+                text.startsWith("ID3") || text.startsWith("OggS") ||
+                (firstBytes.size >= 2 &&
+                    (firstBytes[0].toInt() and 0xff) == 0xff &&
+                    (firstBytes[1].toInt() and 0xe0) == 0xe0) ||
+                (firstBytes.size >= 8 && text.substring(4).startsWith("ftyp"))
+            return if (hasAudioHeader) {
+                StreamProbeResult(true, "Audio stream accessible (HTTP $status).")
+            } else {
+                StreamProbeResult(false, "Server responded (HTTP $status), but no recognizable audio header was returned.")
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
 
     private fun request(method: String, params: Map<String, String> = emptyMap()): JSONObject {
         // Safe to retry metadata GETs, never any mutating API request.
