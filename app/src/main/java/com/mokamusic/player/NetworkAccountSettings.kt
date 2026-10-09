@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.mokamusic.player.network.NetworkStreamQuality
 
 /** Credentials belong in Settings; Library → Network is browse/play only. */
 @Composable
@@ -50,6 +51,22 @@ internal fun NetworkAccountSettings(state: NetworkLibraryState) {
                     singleLine = true, modifier = Modifier.fillMaxWidth()
                 )
             }
+            Text("Streaming quality", style = MaterialTheme.typography.titleMedium)
+            NetworkStreamQuality.entries.forEach { option ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(
+                        selected = state.streamQuality == option,
+                        onClick = { state.updateStreamQuality(option) }
+                    )
+                    Text(option.label)
+                }
+            }
+            Text(
+                "Original requests the source file without transcoding or a bitrate limit. " +
+                    "Lossless files stay lossless; original MP3 files remain MP3. " +
+                    "WMA uses an MP3 compatibility stream. Restart playback after changing quality.",
+                style = MaterialTheme.typography.bodySmall
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(
                     checked = state.rememberLogin,
