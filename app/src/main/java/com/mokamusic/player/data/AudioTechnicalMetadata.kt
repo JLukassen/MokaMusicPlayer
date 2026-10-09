@@ -98,6 +98,9 @@ internal fun parsePcmWavHeader(bytes: ByteArray): AudioTechnicalMetadata? {
         if (marker(offset) == "fmt " && size >= 16) {
             val formatTag = u16(start)
             if (formatTag != 1 && formatTag != 3 && formatTag != 0xfffe) return null
+            // WAVE_FORMAT_EXTENSIBLE must actually contain PCM or IEEE float audio.
+            if (formatTag == 0xfffe && (size < 40 ||
+                u32(start + 24) !in listOf(1L, 3L))) return null
             val channels = u16(start + 2)
             val sampleRate = u32(start + 4)
             val byteRate = u32(start + 8)
