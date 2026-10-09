@@ -12,10 +12,21 @@ import java.security.SecureRandom
 data class NetworkAlbum(val id: String, val name: String, val artist: String, val songCount: Int)
 data class NetworkArtist(val id: String, val name: String, val albumCount: Int)
 data class NetworkGenre(val name: String, val songCount: Int, val albumCount: Int)
+/** OpenSubsonic technical fields describe the original file, not a transcoded stream. */
 data class NetworkSong(
     val id: String, val title: String, val artist: String, val album: String,
-    val durationSeconds: Int, val mimeType: String?, val genre: String = ""
+    val durationSeconds: Int, val mimeType: String?, val genre: String = "",
+    val suffix: String? = null,
+    val sampleRateHz: Int? = null,
+    val bitDepth: Int? = null,
+    val bitrateKbps: Int? = null,
+    val channelCount: Int? = null
 )
+
+enum class NetworkStreamQuality(val label: String) {
+    ORIGINAL("Original / Lossless (when available)"),
+    MP3_320("MP3 (up to 320 kbps)")
+}
 
 /**
  * Explicit HTTPS-only Navidrome/Subsonic connection.
@@ -35,6 +46,9 @@ class SubsonicLibraryClient(
     private val connectionFactory: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection }
 ) {
     private val root: String = validateServerUrl(server)
+
+    /** Explicit user preference; original is the default, including over Tailscale. */
+    var streamQuality: NetworkStreamQuality = NetworkStreamQuality.ORIGINAL
 
     fun ping() { request("ping") }
 
@@ -142,19 +156,35 @@ class SubsonicLibraryClient(
         }
     }
 
+    /** Fetch richer metadata when an album/search index omits technical fields. */
+    fun song(id: String): NetworkSong? =
+        request("getSong", mapOf("id" to id)).optJSONObject("song")?.let { parseSong(it) }
+
     private fun parseSong(
         item: JSONObject, fallbackAlbum: String = "Unknown album",
         fallbackArtist: String = "Unknown artist"
     ): NetworkSong? {
         val id = item.optString("id").takeIf(String::isNotBlank) ?: return null
         // Some Subsonic servers omit contentType on the song index, but send suffix.
+        val suffix = item.optString("suffix").takeIf(String::isNotBlank)?.lowercase()
         val mime = item.optString("contentType").takeIf(String::isNotBlank)
-            ?: item.optString("suffix").takeIf { it.equals("wma", ignoreCase = true) }
-                ?.let { "audio/x-ms-wma" }
+            ?: when (suffix) {
+                "wma" -> "audio/x-ms-wma"
+                "flac" -> "audio/flac"
+                "wav", "wave" -> "audio/wav"
+                "mp3" -> "audio/mpeg"
+                "opus" -> "audio/opus"
+                "ogg" -> "audio/ogg"
+                "m4a" -> "audio/mp4"
+                else -> null
+            }
+        fun positive(name: String) = item.optInt(name, 0).takeIf { it > 0 }
         return NetworkSong(id, item.optString("title", "Unknown track"),
             item.optString("artist", fallbackArtist),
             item.optString("album", fallbackAlbum), item.optInt("duration", 0),
-            mime, item.optString("genre"))
+            mime, item.optString("genre"), suffix,
+            positive("samplingRate") ?: positive("sampleRate"),
+            positive("bitDepth"), positive("bitRate"), positive("channelCount"))
     }
 
     // WMA/ASF cannot be extracted directly by Android Media3. Request an MP3 stream
@@ -165,17 +195,27 @@ class SubsonicLibraryClient(
                 it.contains("ms-asf", ignoreCase = true)
         } == true
 
+    private fun usesMp3(sourceMimeType: String?): Boolean =
+        streamQuality == NetworkStreamQuality.MP3_320 || needsMp3Transcode(sourceMimeType)
+
     fun playbackMimeType(sourceMimeType: String?): String? =
-        if (needsMp3Transcode(sourceMimeType)) "audio/mpeg" else sourceMimeType
+        if (usesMp3(sourceMimeType)) "audio/mpeg" else sourceMimeType
+
+    fun streamFormatLabel(sourceMimeType: String?): String =
+        if (usesMp3(sourceMimeType)) "MP3 · transcoded" else "Original · no transcoding"
 
     fun streamUri(id: String, sourceMimeType: String? = null): Uri =
         Uri.parse(streamRequestUrl(id, sourceMimeType))
 
-    /** Builds a signed streaming endpoint; exposed for JVM tests without android.net.Uri. */
-    internal fun streamRequestUrl(id: String, sourceMimeType: String? = null): String = endpoint(
-        "stream", mapOf("id" to id, "format" to
-            if (needsMp3Transcode(sourceMimeType)) "mp3" else "raw")
-    )
+    /** Raw bypasses all server transcoding and bitrate limits. WMA uses MP3 for Android compatibility. */
+    internal fun streamRequestUrl(id: String, sourceMimeType: String? = null): String {
+        val mp3 = usesMp3(sourceMimeType)
+        return endpoint("stream", mapOf(
+            "id" to id,
+            "format" to if (mp3) "mp3" else "raw",
+            "maxBitRate" to if (mp3) "320" else "0"
+        ))
+    }
 
     /**
      * Validate the *audio response*, not only ping/catalog permissions. Some Navidrome
