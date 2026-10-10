@@ -71,6 +71,79 @@ class SubsonicLibraryClientTest {
         }
     }
 
+    @Test fun originalStreamsAreUnlimitedAndOptionalMp3ProfileCanBeSelected() {
+        val client = SubsonicLibraryClient("https://music.example.org", "user", "password")
+        assertEquals(NetworkStreamQuality.ORIGINAL, client.streamQuality)
+        val flac = client.streamRequestUrl("song-flac", "audio/flac")
+        assertTrue(flac.contains("format=raw"))
+        assertTrue(flac.contains("maxBitRate=0"))
+        assertEquals("audio/flac", client.playbackMimeType("audio/flac"))
+        assertEquals("Original · no transcoding", client.streamFormatLabel("audio/flac"))
+
+        client.streamQuality = NetworkStreamQuality.MP3_320
+        val compressed = client.streamRequestUrl("song-flac", "audio/flac")
+        assertTrue(compressed.contains("format=mp3"))
+        assertTrue(compressed.contains("maxBitRate=320"))
+        assertEquals("audio/mpeg", client.playbackMimeType("audio/flac"))
+        assertEquals("MP3 · transcoded", client.streamFormatLabel("audio/flac"))
+    }
+
+    @Test fun songCatalogParsesOriginalSampleRateDepthBitrateAndChannels() {
+        val response = """{"subsonic-response":{"status":"ok","randomSongs":{"song":[
+            {"id":"hires","title":"Hi-Res","suffix":"flac","samplingRate":192000,
+             "bitDepth":24,"bitRate":5200,"channelCount":2}
+        ]}}}"""
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            FakeHttps(url, response)
+        }
+        val song = client.randomSongs(1).single()
+        assertEquals("audio/flac", song.mimeType)
+        assertEquals("flac", song.suffix)
+        assertEquals(192000, song.sampleRateHz)
+        assertEquals(24, song.bitDepth)
+        assertEquals(5200, song.bitrateKbps)
+        assertEquals(2, song.channelCount)
+    }
+
+    @Test fun getSongFallbackSuppliesTechnicalFieldsMissingFromAlbumIndex() {
+        val response = """{"subsonic-response":{"status":"ok","song":{
+            "id":"missing","title":"Recovered","contentType":"audio/wav",
+            "samplingRate":96000,"bitDepth":24,"bitRate":4608,"channelCount":2
+        }}}"""
+        val requested = mutableListOf<URL>()
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            requested += url
+            FakeHttps(url, response)
+        }
+        val detail = client.song("missing")!!
+        assertEquals(96000, detail.sampleRateHz)
+        assertEquals(24, detail.bitDepth)
+        assertEquals(4608, detail.bitrateKbps)
+        assertEquals("audio/wav", detail.mimeType)
+        assertTrue(requested.single().path.endsWith("/rest/getSong.view"))
+    }
+
+    @Test fun wmaRequestsMp3ButFlacAndWavStayRaw() {
+        val client = SubsonicLibraryClient("https://music.example.org", "test", "secret")
+        assertTrue(client.streamRequestUrl("song-wma", "audio/x-ms-wma").contains("format=mp3"))
+        assertTrue(client.streamRequestUrl("song-wma", "audio/x-ms-wma").contains("maxBitRate=320"))
+        assertTrue(client.streamRequestUrl("song-asf", "audio/x-ms-asf").contains("format=mp3"))
+        assertEquals("audio/mpeg", client.playbackMimeType("audio/x-ms-wma"))
+        assertTrue(client.streamRequestUrl("song-flac", "audio/flac").contains("format=raw"))
+        assertTrue(client.streamRequestUrl("song-wav", "audio/wav").contains("format=raw"))
+        assertEquals("audio/flac", client.playbackMimeType("audio/flac"))
+    }
+
+    @Test fun streamProbeMatchesPlaybackTranscodeChoice() {
+        val requested = mutableListOf<String>()
+        val client = SubsonicLibraryClient("https://music.example.org", "test", "secret") { url ->
+            requested += url.toString()
+            FakeHttps(url, "ID3\\u0003\\u0000")
+        }
+        assertTrue(client.checkStream("song", "audio/x-ms-wma").playable)
+        assertTrue(requested.single().contains("format=mp3"))
+    }
+
     @Test fun streamUrlIsSignedAndHttps() {
         val client = SubsonicLibraryClient("https://music.example.org", "demo", "demo")
         val uri = client.streamRequestUrl("track 9")
@@ -146,6 +219,76 @@ class SubsonicLibraryClientTest {
             it.query.contains("genre=K-Pop") })
         assertTrue(requested.any { it.path.endsWith("/search3.view") &&
             it.query.contains("songOffset=25") && it.query.contains("songCount=50") })
+    }
+
+    @Test fun randomSongsUsesSubsonicEndpointAndDeduplicatesResults() {
+        val requested = mutableListOf<URL>()
+        val response = """{"subsonic-response":{"status":"ok","randomSongs":{"song":[
+            {"id":"101","title":"A","artist":"ILLIT","album":"Bomb","contentType":"audio/flac"},
+            {"id":"102","title":"B","artist":"ILLIT","album":"Bomb"},
+            {"id":"101","title":"A","artist":"ILLIT","album":"Bomb"}
+        ]}}}"""
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            requested += url
+            FakeHttps(url, response)
+        }
+        val songs = client.randomSongs(900)
+        assertEquals(listOf("101", "102"), songs.map { it.id })
+        assertEquals("ILLIT", songs.first().artist)
+        assertEquals("audio/flac", songs.first().mimeType)
+        assertTrue(requested.single().path.endsWith("/rest/getRandomSongs.view"))
+        assertTrue(requested.single().query.contains("size=500"))
+    }
+
+    @Test fun catalogRetriesTransientHttpErrorsWithoutChangingApiParameters() {
+        var calls = 0
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            calls++
+            FakeHttps(url, albumResponse, if (calls == 1) 503 else 200)
+        }
+        assertEquals("album1", client.albums().single().id)
+        assertEquals(2, calls)
+    }
+
+    @Test fun authenticationFailuresDoNotRetryOrExposeCredentials() {
+        var calls = 0
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "secret") { url ->
+            calls++
+            FakeHttps(url, "", 401)
+        }
+        val failure = assertThrows(SubsonicHttpException::class.java) { client.albums() }
+        assertEquals(401, failure.statusCode)
+        assertEquals(1, calls)
+        assertFalse(failure.message.orEmpty().contains("secret"))
+        assertFalse(failure.message.orEmpty().contains("/rest/"))
+    }
+
+    @Test fun streamedAudioProbeReadsOnlyFirstBytesUsingRange() {
+        val requested = mutableListOf<URL>()
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            requested += url
+            FakeHttps(url, "fLaC\\u0000example-audio", 206)
+        }
+        val result = client.checkStream("audio123")
+        assertTrue(result.playable)
+        assertTrue(result.message.contains("206"))
+        assertEquals(1, requested.size)
+        assertTrue(requested.single().path.endsWith("/stream.view"))
+        assertTrue(requested.single().query.contains("id=audio123"))
+    }
+
+    @Test fun streamProbeRejectsHtmlAndReportsAudioPermissionFailure() {
+        val client = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            FakeHttps(url, "<html>login</html>")
+        }
+        val result = client.checkStream("audio123")
+        assertFalse(result.playable)
+        assertTrue(result.message.contains("instead of audio"))
+        val denied = SubsonicLibraryClient("https://music.example.org", "u", "pw") { url ->
+            FakeHttps(url, "", 403)
+        }
+        val error = assertThrows(SubsonicHttpException::class.java) { denied.checkStream("audio123") }
+        assertEquals(403, error.statusCode)
     }
 
     @Test fun blankSearchDoesNotCallServer() {

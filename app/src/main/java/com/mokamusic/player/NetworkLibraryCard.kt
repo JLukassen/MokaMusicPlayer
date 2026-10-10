@@ -24,7 +24,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mokamusic.player.network.NetworkAlbum
 import com.mokamusic.player.network.NetworkSong
+import com.mokamusic.player.network.NetworkStreamQuality
 import com.mokamusic.player.network.SubsonicLibraryClient
+import com.mokamusic.player.network.SubsonicHttpException
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -50,8 +56,14 @@ internal class NetworkLibraryState(
     var password by mutableStateOf("")
     var rememberLogin by mutableStateOf(prefs.getBoolean("remember_login", true))
         private set
+    var streamQuality by mutableStateOf(
+        runCatching {
+            NetworkStreamQuality.valueOf(prefs.getString("stream_quality", "ORIGINAL") ?: "ORIGINAL")
+        }.getOrDefault(NetworkStreamQuality.ORIGINAL)
+    )
+        private set
     var search by mutableStateOf("")
-    var category by mutableIntStateOf(1) // 0 Tracks, 1 Albums, 2 Artists, 3 Genres
+    var category by mutableIntStateOf(0) // 0 Tracks, 1 Albums, 2 Artists, 3 Genres
         private set
     var artists by mutableStateOf<List<com.mokamusic.player.network.NetworkArtist>>(emptyList())
         private set
@@ -73,6 +85,8 @@ internal class NetworkLibraryState(
         private set
     var trackBrowsingComplete by mutableStateOf(false)
         private set
+    var trackBatchFailed by mutableStateOf(false)
+        private set
     var searchedTracks by mutableStateOf<List<NetworkSong>>(emptyList())
         private set
     var activeTrackSearch by mutableStateOf("")
@@ -90,12 +104,36 @@ internal class NetworkLibraryState(
         private set
     var busy by mutableStateOf(false)
         private set
+    // Mixed shuffle is independent of the library browsing/paging spinner.
+    var mixedShuffleBusy by mutableStateOf(false)
+    var mixedShuffleStatus by mutableStateOf<String?>(null)
+    var streamCheckBusy by mutableStateOf(false)
+        private set
+    var streamCheckStatus by mutableStateOf<String?>(null)
+        private set
+    var playbackStatus by mutableStateOf<String?>(null)
     var status by mutableStateOf<String?>(null)
         private set
     var hasMoreAlbums by mutableStateOf(false)
         private set
+    var albumBatchFailed by mutableStateOf(false)
+        private set
     private var nextAlbumOffset = 0
     private var autoReconnectAttempted = false
+
+    /** Keep request URLs, credentials and token/salt out of failure messages. */
+    private fun failureHint(e: Exception): String = when (e) {
+        is SubsonicHttpException -> when (e.statusCode) {
+            401, 403 -> "Navidrome denied access (HTTP ${e.statusCode}); check your account."
+            429 -> "Navidrome is rate-limiting requests (HTTP 429)."
+            else -> "Navidrome returned HTTP ${e.statusCode}."
+        }
+        is SocketTimeoutException -> "Navidrome timed out; check Tailscale and server load."
+        is UnknownHostException -> "Can't resolve the server hostname; check Tailscale or DNS."
+        is SSLException -> "HTTPS certificate/connection error."
+        is IOException -> "Network connection failed; check Wi-Fi, cellular or Tailscale."
+        else -> "Navidrome returned an unexpected API response."
+    }
 
     val savedLoginAvailable: Boolean
         get() = credentialStore.isSaved() &&
@@ -110,6 +148,13 @@ internal class NetworkLibraryState(
     fun updateUsername(value: String) {
         username = value
         prefs.edit().putString("username", value).apply()
+    }
+
+    fun updateStreamQuality(value: NetworkStreamQuality) {
+        streamQuality = value
+        prefs.edit().putString("stream_quality", value.name).apply()
+        client?.streamQuality = value
+        streamCheckStatus = null
     }
 
     fun updateRememberLogin(value: Boolean) {
@@ -148,7 +193,9 @@ internal class NetworkLibraryState(
                 status = "Enter your password. The saved login may no longer be available."
                 return
             }
-            val candidate = SubsonicLibraryClient(target, account, secret)
+            val candidate = SubsonicLibraryClient(target, account, secret).apply {
+                streamQuality = this@NetworkLibraryState.streamQuality
+            }
             val first = withContext(Dispatchers.IO) {
                 candidate.ping()
                 candidate.albums(offset = 0, size = PAGE_SIZE)
@@ -165,7 +212,9 @@ internal class NetworkLibraryState(
             genreSongs = emptyList()
             browsedTracks = emptyList()
             trackAlbumCursor = 0
-            trackBrowsingComplete = false
+            trackBrowsingComplete = first.isEmpty()
+            trackBatchFailed = false
+            albumBatchFailed = false
             searchedTracks = emptyList()
             activeTrackSearch = ""
             hasMoreSearch = false
@@ -192,60 +241,119 @@ internal class NetworkLibraryState(
             } else message
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
-        } catch (_: Exception) {
-            // Do not expose Subsonic token/salt URLs or passwords in the UI.
-            status = "Connection failed. Check HTTPS, login and server access."
+        } catch (e: Exception) {
+            status = "Connection failed: ${failureHint(e)}"
         } finally {
             busy = false
         }
+        // Populate Tracks on connect, without requiring a separate button press.
+        if (client != null && category == 0 && browsedTracks.isEmpty()) loadTrackBatch()
     }
 
+    /** Check whether Navidrome can serve bytes for an indexed track. */
+    fun testStream() {
+        val active = client ?: run {
+            streamCheckStatus = "Connect Navidrome first."
+            return
+        }
+        if (streamCheckBusy) return
+        streamCheckBusy = true
+        streamCheckStatus = "Testing Navidrome audio access…"
+        appScope.launch {
+            try {
+                val song = browsedTracks.firstOrNull() ?: songs.firstOrNull()
+                    ?: genreSongs.firstOrNull() ?: searchedTracks.firstOrNull()
+                    ?: withContext(Dispatchers.IO) { active.randomSongs(1).firstOrNull() }
+                if (song == null) {
+                    streamCheckStatus = "No server tracks found to test."
+                    return@launch
+                }
+                val result = withContext(Dispatchers.IO) { active.checkStream(song.id, song.mimeType) }
+                if (client === active) {
+                    streamCheckStatus = result.message +
+                        if (result.playable) " Try playing a song in Moka."
+                        else " Check Navidrome file permissions and proxy settings."
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) {
+                if (client === active) {
+                    streamCheckStatus = "Stream check failed: ${failureHint(e)}"
+                }
+            } finally {
+                streamCheckBusy = false
+            }
+        }
+    }
+
+    /** Explicit network refresh; only replace the currently displayed catalog on success. */
     fun refresh() {
-        if (busy || client == null) return
-        appScope.launch { refreshInternal() }
-    }
-
-    private suspend fun refreshInternal() {
         val active = client ?: return
         if (busy) return
         busy = true
-        status = "Refreshing albums…"
-        try {
-            val first = withContext(Dispatchers.IO) { active.albums(0, PAGE_SIZE) }
-            albums = first.distinctBy { it.id }
-            hasMoreAlbums = first.size == PAGE_SIZE
-            nextAlbumOffset = first.size
-            status = "Refreshed · ${albums.size} albums"
-        } catch (e: Exception) {
-            status = "Couldn't refresh albums. Check the server connection."
-        } finally {
-            busy = false
+        status = "Refreshing Navidrome library…"
+        appScope.launch {
+            var refreshed = false
+            try {
+                val first = withContext(Dispatchers.IO) { active.albums(0, PAGE_SIZE) }
+                if (client !== active) return@launch
+                albums = first.distinctBy { it.id }
+                hasMoreAlbums = first.size == PAGE_SIZE
+                nextAlbumOffset = first.size
+                albumBatchFailed = false
+                browsedTracks = emptyList()
+                trackAlbumCursor = 0
+                trackBrowsingComplete = first.isEmpty()
+                trackBatchFailed = false
+                searchedTracks = emptyList()
+                activeTrackSearch = ""
+                hasMoreSearch = false
+                selectedAlbum = null
+                selectedArtist = null
+                selectedGenre = null
+                songs = emptyList()
+                artistAlbums = emptyList()
+                genreSongs = emptyList()
+                artists = emptyList()
+                genres = emptyList()
+                status = if (first.isEmpty()) "Connected, but no albums were returned."
+                         else "Refreshed · ${albums.size} albums"
+                refreshed = true
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { status = "Refresh failed: ${failureHint(e)}" }
+            finally {
+                busy = false
+            }
+            if (refreshed && client === active && category == 0 && !trackBrowsingComplete) {
+                loadTrackBatch()
+            }
         }
     }
 
     fun loadMore() {
-        if (busy || client == null || !hasMoreAlbums) return
-        appScope.launch { loadMoreInternal() }
-    }
-
-    private suspend fun loadMoreInternal() {
         val active = client ?: return
         if (busy || !hasMoreAlbums) return
+        // Claim the request before dispatch so two scroll effects cannot request the same page.
         busy = true
+        albumBatchFailed = false
         val offset = nextAlbumOffset
         status = "Loading more albums…"
-        try {
-            val next = withContext(Dispatchers.IO) {
-                active.albums(offset = offset, size = PAGE_SIZE)
+        appScope.launch {
+            try {
+                val next = withContext(Dispatchers.IO) {
+                    active.albums(offset = offset, size = PAGE_SIZE)
+                }
+                if (client !== active) return@launch
+                albums = (albums + next).distinctBy { it.id }
+                nextAlbumOffset = offset + next.size
+                hasMoreAlbums = next.size == PAGE_SIZE
+                status = "${albums.size} albums loaded"
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) {
+                albumBatchFailed = true
+                status = "Couldn't load albums: ${failureHint(e)} Tap Load more to retry."
+            } finally {
+                busy = false
             }
-            albums = (albums + next).distinctBy { it.id }
-            nextAlbumOffset += next.size
-            hasMoreAlbums = next.size == PAGE_SIZE
-            status = "${albums.size} albums loaded"
-        } catch (e: Exception) {
-            status = "Couldn't load more albums. Try again."
-        } finally {
-            busy = false
         }
     }
 
@@ -354,45 +462,71 @@ internal class NetworkLibraryState(
         }
     }
 
-    /** Incrementally browse all tracks, eight album requests per explicit batch. */
+    /** Incrementally browse the server, preserving completed albums if one request fails.
+     * Four albums at a time keeps cellular requests short and leaves the UI responsive.
+     */
     fun loadTrackBatch() {
         val active = client ?: return
         if (busy || trackBrowsingComplete) return
+        busy = true
+        trackBatchFailed = false
+        status = "Loading tracks from Navidrome…"
         appScope.launch {
-            busy = true
-            status = "Loading tracks from the server…"
             try {
                 var catalog = albums
                 var offset = nextAlbumOffset
                 var more = hasMoreAlbums
                 var cursor = trackAlbumCursor
+                var failure: Exception? = null
                 val collected = withContext(Dispatchers.IO) {
                     val batch = mutableListOf<NetworkSong>()
                     var loaded = 0
-                    while (loaded < 8) {
+                    while (loaded < 4) {
                         if (cursor >= catalog.size && more) {
-                            val page = active.albums(offset, PAGE_SIZE)
+                            val page = try {
+                                active.albums(offset, PAGE_SIZE)
+                            } catch (e: Exception) {
+                                failure = e
+                                break
+                            }
                             offset += page.size
                             more = page.size == PAGE_SIZE
                             catalog = (catalog + page).distinctBy { it.id }
                         }
                         if (cursor >= catalog.size) break
-                        batch += active.songs(catalog[cursor].id)
-                        cursor++
-                        loaded++
+                        try {
+                            batch += active.songs(catalog[cursor].id)
+                            cursor++
+                            loaded++
+                        } catch (e: Exception) {
+                            // Keep earlier albums; retry the failed album in the next batch.
+                            failure = e
+                            break
+                        }
                     }
                     batch
                 }
+                if (client !== active) return@launch
                 albums = catalog
                 hasMoreAlbums = more
                 nextAlbumOffset = offset
                 trackAlbumCursor = cursor
                 browsedTracks = (browsedTracks + collected).distinctBy { it.id }
                 trackBrowsingComplete = cursor >= catalog.size && !more
-                status = if (browsedTracks.isEmpty()) "No server tracks found yet." else null
+                trackBatchFailed = failure != null
+                status = if (failure != null) {
+                    "Loaded ${browsedTracks.size} tracks; stopped at album ${cursor + 1}: " +
+                        failureHint(failure!!) + " Tap Load more to retry."
+                } else if (browsedTracks.isEmpty()) {
+                    "No server tracks found yet."
+                } else null
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (_: Exception) { status = "Couldn't load tracks. Retry this batch." }
-            finally { busy = false }
+            catch (e: Exception) {
+                trackBatchFailed = true
+                status = "Couldn't load tracks: ${failureHint(e)} Tap Load more to retry."
+            } finally {
+                busy = false
+            }
         }
     }
 
@@ -419,7 +553,7 @@ internal class NetworkLibraryState(
                 hasMoreSearch = page.size == PAGE_SIZE
                 status = if (searchedTracks.isEmpty()) "No matching server tracks." else null
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (_: Exception) { status = "Couldn't search server tracks." }
+            catch (e: Exception) { status = "Couldn't search tracks: ${failureHint(e)}" }
             finally { busy = false }
         }
     }
@@ -439,8 +573,9 @@ internal class NetworkLibraryState(
             selectedAlbum = album
             songs = tracks
             status = if (tracks.isEmpty()) "This album has no playable tracks." else null
-        } catch (e: Exception) {
-            status = "Couldn't load this album. Try again."
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) {
+            status = "Couldn't load album: ${failureHint(e)}"
         } finally {
             busy = false
         }
@@ -456,6 +591,8 @@ internal class NetworkLibraryState(
         autoReconnectAttempted = true
         client = null
         password = ""
+        streamCheckStatus = null
+        playbackStatus = null
         selectedAlbum = null
         albums = emptyList()
         songs = emptyList()
@@ -469,6 +606,8 @@ internal class NetworkLibraryState(
         browsedTracks = emptyList()
         trackAlbumCursor = 0
         trackBrowsingComplete = false
+        trackBatchFailed = false
+        albumBatchFailed = false
         searchedTracks = emptyList()
         activeTrackSearch = ""
         hasMoreSearch = false
