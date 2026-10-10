@@ -2,6 +2,7 @@ package com.mokamusic.player.network
 
 import android.net.Uri
 import org.json.JSONObject
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -11,16 +12,33 @@ import java.security.SecureRandom
 data class NetworkAlbum(val id: String, val name: String, val artist: String, val songCount: Int)
 data class NetworkArtist(val id: String, val name: String, val albumCount: Int)
 data class NetworkGenre(val name: String, val songCount: Int, val albumCount: Int)
+/** OpenSubsonic technical fields describe the original file, not a transcoded stream. */
 data class NetworkSong(
     val id: String, val title: String, val artist: String, val album: String,
-    val durationSeconds: Int, val mimeType: String?, val genre: String = ""
+    val durationSeconds: Int, val mimeType: String?, val genre: String = "",
+    val suffix: String? = null,
+    val sampleRateHz: Int? = null,
+    val bitDepth: Int? = null,
+    val bitrateKbps: Int? = null,
+    val channelCount: Int? = null
 )
+
+enum class NetworkStreamQuality(val label: String) {
+    ORIGINAL("Original / Lossless (when available)"),
+    MP3_320("MP3 (up to 320 kbps)")
+}
 
 /**
  * Explicit HTTPS-only Navidrome/Subsonic connection.
  * Username and password stay in memory; nothing is written to preferences or logs.
  * Subsonic token/salt hashes are only passed to the caller-selected HTTPS server.
  */
+/** Sanitized HTTP failure: never put the token-bearing request URL into UI or logs. */
+class SubsonicHttpException(val statusCode: Int) :
+    IllegalStateException("Navidrome HTTP $statusCode")
+
+data class StreamProbeResult(val playable: Boolean, val message: String)
+
 class SubsonicLibraryClient(
     server: String,
     private val user: String,
@@ -28,6 +46,9 @@ class SubsonicLibraryClient(
     private val connectionFactory: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection }
 ) {
     private val root: String = validateServerUrl(server)
+
+    /** Explicit user preference; original is the default, including over Tailscale. */
+    var streamQuality: NetworkStreamQuality = NetworkStreamQuality.ORIGINAL
 
     fun ping() { request("ping") }
 
@@ -98,6 +119,19 @@ class SubsonicLibraryClient(
         }.distinctBy { it.name }
     }
 
+    /** A server-chosen sample of music for mixed device + Navidrome shuffle.
+     * This avoids crawling every album over a cellular/Tailscale connection.
+     * Subsonic getRandomSongs accepts up to 500 songs per request.
+     */
+    fun randomSongs(count: Int = 200): List<NetworkSong> {
+        val rows = request("getRandomSongs", mapOf(
+            "size" to count.coerceIn(1, 500).toString()
+        )).optJSONObject("randomSongs")?.optJSONArray("song") ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { i ->
+            rows.optJSONObject(i)?.let { parseSong(it) }
+        }.distinctBy { it.id }
+    }
+
     /** Server-side genre paging: never download an entire genre just to open it. */
     fun genreSongs(genre: String, offset: Int = 0, size: Int = 100): List<NetworkSong> {
         val rows = request("getSongsByGenre", mapOf(
@@ -122,55 +156,165 @@ class SubsonicLibraryClient(
         }
     }
 
+    /** Fetch richer metadata when an album/search index omits technical fields. */
+    fun song(id: String): NetworkSong? =
+        request("getSong", mapOf("id" to id)).optJSONObject("song")?.let { parseSong(it) }
+
     private fun parseSong(
         item: JSONObject, fallbackAlbum: String = "Unknown album",
         fallbackArtist: String = "Unknown artist"
     ): NetworkSong? {
         val id = item.optString("id").takeIf(String::isNotBlank) ?: return null
+        // Some Subsonic servers omit contentType on the song index, but send suffix.
+        val suffix = item.optString("suffix").takeIf(String::isNotBlank)?.lowercase()
+        val mime = item.optString("contentType").takeIf(String::isNotBlank)
+            ?: when (suffix) {
+                "wma" -> "audio/x-ms-wma"
+                "flac" -> "audio/flac"
+                "wav", "wave" -> "audio/wav"
+                "mp3" -> "audio/mpeg"
+                "opus" -> "audio/opus"
+                "ogg" -> "audio/ogg"
+                "m4a" -> "audio/mp4"
+                else -> null
+            }
+        fun positive(name: String) = item.optInt(name, 0).takeIf { it > 0 }
         return NetworkSong(id, item.optString("title", "Unknown track"),
             item.optString("artist", fallbackArtist),
             item.optString("album", fallbackAlbum), item.optInt("duration", 0),
-            item.optString("contentType").takeIf(String::isNotBlank),
-            item.optString("genre"))
+            mime, item.optString("genre"), suffix,
+            positive("samplingRate") ?: positive("sampleRate"),
+            positive("bitDepth"), positive("bitRate"), positive("channelCount"))
     }
 
-    fun streamUri(id: String): Uri = Uri.parse(streamRequestUrl(id))
+    // WMA/ASF cannot be extracted directly by Android Media3. Request an MP3 stream
+    // only for these tracks; preserve bit-perfect raw access for playable WAV/FLAC/etc.
+    internal fun needsMp3Transcode(sourceMimeType: String?): Boolean =
+        sourceMimeType?.let {
+            it.contains("wma", ignoreCase = true) ||
+                it.contains("ms-asf", ignoreCase = true)
+        } == true
 
-    /** Builds a signed streaming endpoint; exposed for JVM tests without android.net.Uri. */
-    internal fun streamRequestUrl(id: String): String = endpoint(
-        "stream", mapOf("id" to id, "format" to "raw")
-    )
+    private fun usesMp3(sourceMimeType: String?): Boolean =
+        streamQuality == NetworkStreamQuality.MP3_320 || needsMp3Transcode(sourceMimeType)
 
-    private fun request(method: String, params: Map<String, String> = emptyMap()): JSONObject {
-        val url = URL(endpoint(method, params))
-        val connection = connectionFactory(url).apply {
-            connectTimeout = 8_000
-            readTimeout = 15_000
+    fun playbackMimeType(sourceMimeType: String?): String? =
+        if (usesMp3(sourceMimeType)) "audio/mpeg" else sourceMimeType
+
+    fun streamFormatLabel(sourceMimeType: String?): String =
+        if (usesMp3(sourceMimeType)) "MP3 · transcoded" else "Original · no transcoding"
+
+    fun streamUri(id: String, sourceMimeType: String? = null): Uri =
+        Uri.parse(streamRequestUrl(id, sourceMimeType))
+
+    /** Raw bypasses all server transcoding and bitrate limits. WMA uses MP3 for Android compatibility. */
+    internal fun streamRequestUrl(id: String, sourceMimeType: String? = null): String {
+        val mp3 = usesMp3(sourceMimeType)
+        return endpoint("stream", mapOf(
+            "id" to id,
+            "format" to if (mp3) "mp3" else "raw",
+            "maxBitRate" to if (mp3) "320" else "0"
+        ))
+    }
+
+    /**
+     * Validate the *audio response*, not only ping/catalog permissions. Some Navidrome
+     * installations can list indexed songs even when the container cannot read the
+     * underlying file. Read only a small range; never download an entire song here.
+     * The signed URL is kept private and must never be logged.
+     */
+    fun checkStream(songId: String, sourceMimeType: String? = null): StreamProbeResult {
+        val connection = connectionFactory(URL(streamRequestUrl(songId, sourceMimeType))).apply {
+            connectTimeout = 15_000
+            readTimeout = 25_000
             instanceFollowRedirects = false
-            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Range", "bytes=0-255")
+            setRequestProperty("Accept", "audio/*, application/octet-stream")
             setRequestProperty("User-Agent", "MokaMusicPlayer/4.0")
         }
         try {
-            check(connection.responseCode in 200..299) {
-                "Server returned HTTP ${connection.responseCode}"
+            val status = connection.responseCode
+            if (status !in 200..299) throw SubsonicHttpException(status)
+            val type = connection.contentType.orEmpty().substringBefore(';').trim().lowercase()
+            val firstBytes = connection.inputStream.use { input ->
+                val sample = ByteArray(32)
+                val count = input.read(sample)
+                if (count > 0) sample.copyOf(count) else byteArrayOf()
             }
-            val body = connection.inputStream.use { input ->
-                val buffer = java.io.ByteArrayOutputStream()
-                val chunk = ByteArray(4096)
-                while (true) {
-                    val n = input.read(chunk)
-                    if (n == -1) break
-                    check(buffer.size() + n <= 2_000_000) { "Network response too large" }
-                    buffer.write(chunk, 0, n)
+            val text = firstBytes.toString(Charsets.US_ASCII).trimStart()
+            val looksLikeJsonOrHtml = type.contains("json") || type.contains("html") ||
+                text.startsWith("{") || text.startsWith("<")
+            if (looksLikeJsonOrHtml) {
+                return StreamProbeResult(false, "Navidrome returned a web/API response instead of audio.")
+            }
+            val hasAudioHeader = type.startsWith("audio/") ||
+                text.startsWith("fLaC") || text.startsWith("RIFF") ||
+                text.startsWith("ID3") || text.startsWith("OggS") ||
+                (firstBytes.size >= 2 &&
+                    (firstBytes[0].toInt() and 0xff) == 0xff &&
+                    (firstBytes[1].toInt() and 0xe0) == 0xe0) ||
+                (firstBytes.size >= 8 && text.substring(4).startsWith("ftyp"))
+            return if (hasAudioHeader) {
+                StreamProbeResult(true, "Audio stream accessible (HTTP $status).")
+            } else {
+                StreamProbeResult(false, "Server responded (HTTP $status), but no recognizable audio header was returned.")
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun request(method: String, params: Map<String, String> = emptyMap()): JSONObject {
+        // Safe to retry metadata GETs, never any mutating API request.
+        val url = URL(endpoint(method, params))
+        for (attempt in 0..1) {
+            var connection: HttpURLConnection? = null
+            try {
+                connection = connectionFactory(url).apply {
+                    connectTimeout = 15_000
+                    readTimeout = 40_000
+                    instanceFollowRedirects = false
+                    setRequestProperty("Accept", "application/json")
+                    setRequestProperty("User-Agent", "MokaMusicPlayer/4.0")
                 }
-                buffer.toString("UTF-8")
+                val code = connection.responseCode
+                if (code !in 200..299) throw SubsonicHttpException(code)
+                val body = connection.inputStream.use { input ->
+                    val buffer = java.io.ByteArrayOutputStream()
+                    val chunk = ByteArray(4096)
+                    while (true) {
+                        val n = input.read(chunk)
+                        if (n == -1) break
+                        check(buffer.size() + n <= 2_000_000) {
+                            "Network response too large"
+                        }
+                        buffer.write(chunk, 0, n)
+                    }
+                    buffer.toString("UTF-8")
+                }
+                val response = JSONObject(body).getJSONObject("subsonic-response")
+                check(response.optString("status") == "ok") {
+                    response.optJSONObject("error")?.optString("message") ?: "Subsonic server error"
+                }
+                return response
+            } catch (e: SubsonicHttpException) {
+                if (attempt == 0 && (e.statusCode == 429 || e.statusCode in 500..599)) {
+                    Thread.sleep(350)
+                    continue
+                }
+                throw e
+            } catch (e: IOException) {
+                // Covers Tailscale reconnects, transient socket failures and read timeouts.
+                if (attempt == 0) {
+                    Thread.sleep(350)
+                    continue
+                }
+                throw e
+            } finally {
+                connection?.disconnect()
             }
-            val response = JSONObject(body).getJSONObject("subsonic-response")
-            check(response.optString("status") == "ok") {
-                response.optJSONObject("error")?.optString("message") ?: "Subsonic server error"
-            }
-            return response
-        } finally { connection.disconnect() }
+        }
+        error("Navidrome request failed after retry")
     }
 
     private fun endpoint(method: String, params: Map<String, String>): String {

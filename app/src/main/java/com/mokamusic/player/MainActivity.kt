@@ -52,6 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -199,6 +200,7 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                     onToggleFavorite = viewModel::toggleFavorite,
                     networkLibrary = networkLibrary,
                     onPlayNetwork = viewModel::playNetworkQueue,
+                    onShuffleMixed = viewModel::shuffleDeviceAndNavidrome,
                     onNetworkSettings = { page = 4 },
                     localPermissionGranted = hasPermission,
                     onRequestLocalPermission = { launcher.launch(permission) }
@@ -303,6 +305,7 @@ private fun LibraryScreen(
     onToggleFavorite: (MusicTrack) -> Unit,
     networkLibrary: NetworkLibraryState,
     onPlayNetwork: (com.mokamusic.player.network.NetworkSong, List<com.mokamusic.player.network.NetworkSong>, Boolean) -> Unit,
+    onShuffleMixed: () -> Unit,
     onNetworkSettings: () -> Unit,
     localPermissionGranted: Boolean,
     onRequestLocalPermission: () -> Unit
@@ -348,6 +351,10 @@ private fun LibraryScreen(
                 onClick = { selectedCollection = null; onTabChange(4) },
                 label = { Text("Network · Navidrome") }
             )
+        }
+
+        if (tab != 4) {
+            NetworkMixedShuffleButton(networkLibrary, tracks.size, onShuffleMixed)
         }
 
         if (selected != null && tab != 4) {
@@ -491,7 +498,9 @@ private fun LibraryScreen(
             4 -> NetworkLibraryScreen(
                 state = networkLibrary,
                 onPlay = onPlayNetwork,
-                onOpenSettings = onNetworkSettings
+                onOpenSettings = onNetworkSettings,
+                deviceTrackCount = tracks.size,
+                onShuffleMixed = onShuffleMixed
             )
         }
     }
@@ -961,6 +970,14 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        state.networkPlaybackError?.let { error ->
+            Text(
+                error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+            )
+        }
         Spacer(Modifier.height(12.dp))
         Row(
             Modifier.fillMaxWidth(),
@@ -1079,9 +1096,14 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 if (showSignal) {
                     HorizontalDivider(Modifier.padding(vertical = 12.dp))
                     SignalRow("Source", track.formatLabel)
-                    SignalRow("Sample rate", tech.sampleRateHz?.let(::formatSampleRate) ?: "Reading…")
-                    SignalRow("Bit depth", tech.bitDepth?.let { "$it-bit" } ?: "Unknown")
-                    SignalRow("Bitrate", tech.bitrate?.let { "${it / 1000} kbps" } ?: "Unknown")
+                    track.networkStreamLabel?.let { SignalRow("Network stream", it) }
+                    val sourceMissing = if (track.networkSongId != null) "Not provided" else "Reading…"
+                    SignalRow("Sample rate", tech.sampleRateHz?.let(::formatSampleRate) ?: sourceMissing)
+                    SignalRow("Bit depth", tech.bitDepth?.let { "$it-bit" } ?: "Not provided")
+                    SignalRow(
+                        if (track.networkStreamLabel?.contains("transcoded") == true) "Source bitrate" else "Bitrate",
+                        tech.bitrate?.let { "${it / 1000} kbps" } ?: "Not provided"
+                    )
                     SignalRow("Output", state.output.routeLabel)
                     SignalRow("Device", state.output.deviceName)
                     SignalRow("Playback engine", state.output.directEngineLabel ?: "Media3 Hi-Res")
@@ -1434,9 +1456,22 @@ private fun EqualizerPreview(gains: List<Float>) {
 
 @Composable
 private fun SignalRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, fontWeight = FontWeight.Medium)
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            value,
+            modifier = Modifier.weight(1f),
+            textAlign = TextAlign.End,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 

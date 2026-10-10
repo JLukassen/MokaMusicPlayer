@@ -13,8 +13,11 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
@@ -49,8 +52,20 @@ class PlaybackService : MediaLibraryService() {
         val renderersFactory = DefaultRenderersFactory(this)
             .setEnableAudioFloatOutput(true)
 
+        // Media3 handles every HTTPS/Navidrome source. A slower WAV/FLAC stream on
+        // cellular or Tailscale needs longer read timeouts than a local audio file.
+        // Do not permit HTTPS -> HTTP redirects for signed streaming URLs.
+        val httpSourceFactory = DefaultHttpDataSource.Factory()
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(45_000)
+            .setAllowCrossProtocolRedirects(false)
+            .setUserAgent("MokaMusicPlayer/4.0")
+        val mediaSources = DefaultMediaSourceFactory(this)
+            .setDataSourceFactory(DefaultDataSource.Factory(this, httpSourceFactory))
+
         val audioOutputProvider = MokaAudioOutputProvider(this)
         val fallback = ExoPlayer.Builder(this, renderersFactory)
+            .setMediaSourceFactory(mediaSources)
             .setAudioOutputProvider(audioOutputProvider)
             .setAudioAttributes(musicAttributes, false) // MokaAudioFocusController owns focus for both engines
             .setHandleAudioBecomingNoisy(false) // handled for both engines by this service

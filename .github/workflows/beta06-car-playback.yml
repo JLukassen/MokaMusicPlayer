@@ -2,9 +2,9 @@ name: Beta 6 car playback verification
 
 on:
   push:
-    branches: [beta06-car-playback-transitions]
+    branches: [beta06-car-playback-transitions, beta06-unified-navidrome-shuffle]
   pull_request:
-    branches: [beta061-network-duplicate-safety]
+    branches: [beta061-network-duplicate-safety, beta06-unified-navidrome-shuffle]
   workflow_dispatch:
 
 permissions:
@@ -41,17 +41,17 @@ jobs:
           APK=app/build/outputs/apk/debug/app-debug.apk
           test -s "$APK"
           "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" |
-            grep -E "package: name='com.mokamusic.player'.*versionCode='33'.*versionName='4.0.0-beta06-rc2.1-dev'"
-          cp "$APK" Moka-Music-Player-4.0.0-beta06-rc2.1-dev-debug.apk
-          sha256sum Moka-Music-Player-4.0.0-beta06-rc2.1-dev-debug.apk > SHA256SUMS.txt
+            grep -E "package: name='com.mokamusic.player'.*versionCode='37'.*versionName='4.0.0-beta06-rc2.5-dev'"
+          cp "$APK" Moka-Music-Player-4.0.0-beta06-rc2.5-dev-debug.apk
+          sha256sum Moka-Music-Player-4.0.0-beta06-rc2.5-dev-debug.apk > SHA256SUMS.txt
       - name: Upload debug APK and test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: moka-beta06-car-playback-rc2-1-dev
+          name: moka-beta06-navidrome-wma-rc2-5-dev
           if-no-files-found: warn
           path: |
-            Moka-Music-Player-4.0.0-beta06-rc2.1-dev-debug.apk
+            Moka-Music-Player-4.0.0-beta06-rc2.5-dev-debug.apk
             SHA256SUMS.txt
             app/build/reports/tests/testDebugUnitTest/**
             app/build/test-results/testDebugUnitTest/**

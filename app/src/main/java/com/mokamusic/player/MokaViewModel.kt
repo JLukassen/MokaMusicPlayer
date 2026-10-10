@@ -15,6 +15,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
@@ -72,6 +73,7 @@ data class MokaUiState(
     val metadataNamePreference: MetadataNamePreference = MetadataNamePreference.FILE_TAGS,
     val controllerReady: Boolean = false,
     val currentTrack: MusicTrack? = null,
+    val networkPlaybackError: String? = null,
     val technical: AudioTechnicalMetadata = AudioTechnicalMetadata(),
     val output: AudioOutputStatus = AudioOutputStatus(),
     val isPlaying: Boolean = false,
@@ -141,7 +143,35 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) = syncPlaybackState()
         override fun onPlaybackStateChanged(playbackState: Int) = syncPlaybackState()
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = syncPlaybackState(readTechnical = true)
+        override fun onPlayerError(error: PlaybackException) {
+            val activeUri = controller?.currentMediaItem?.localConfiguration?.uri
+            if (activeUri?.scheme?.lowercase() == "https") {
+                val hint = when (error.errorCode) {
+                    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+                        "Navidrome returned an HTTP error. Run Test Navidrome audio stream in Settings."
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ->
+                        "Streaming timed out. Check Navidrome/Tailscale and try again."
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ->
+                        "Streaming connection failed. Check Tailscale and server connectivity."
+                    PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE,
+                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ->
+                        "Server returned unplayable audio. Check its source file and encoding."
+                    else -> "Playback failed (Media3 ${error.errorCodeName}). Test the stream in Settings."
+                }
+                val message = "Navidrome stream: $hint"
+                networkLibrary.playbackStatus = message
+                _uiState.value = _uiState.value.copy(networkPlaybackError = message)
+                // Intentionally exclude exception, cause and signed URI: these can contain auth tokens.
+                android.util.Log.w("MokaNetworkPlayback", "stream errorCode=${error.errorCode}")
+            }
+            syncPlaybackState()
+        }
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            networkLibrary.playbackStatus = null
+            _uiState.value = _uiState.value.copy(networkPlaybackError = null)
+            syncPlaybackState(readTechnical = true)
+        }
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = syncPlaybackState()
         override fun onRepeatModeChanged(repeatMode: Int) = syncPlaybackState()
         override fun onAvailableCommandsChanged(availableCommands: Player.Commands) = syncPlaybackState()
@@ -287,11 +317,28 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private fun networkMusicTrack(song: NetworkSong, url: Uri): MusicTrack {
         // Keep remote IDs in the negative range to avoid colliding with MediaStore IDs.
         val remoteId = -(song.id.hashCode().toLong() and 0x7fffffffL) - 1L
+        val sourceFormat = song.suffix?.uppercase() ?: when {
+            song.mimeType?.contains("flac", true) == true -> "FLAC"
+            song.mimeType?.contains("wav", true) == true -> "WAV"
+            song.mimeType?.contains("mpeg", true) == true -> "MP3"
+            song.mimeType?.contains("opus", true) == true -> "OPUS"
+            song.mimeType?.contains("wma", true) == true -> "WMA"
+            else -> null
+        }
+        val client = networkLibrary.client
         return MusicTrack(
             id = remoteId, uri = url, displayName = song.title,
             title = song.title, artist = song.artist, album = song.album,
             albumId = -1L, durationMs = song.durationSeconds.coerceAtLeast(0) * 1000L,
-            mimeType = song.mimeType, sizeBytes = 0L, relativePath = null
+            mimeType = client?.playbackMimeType(song.mimeType) ?: song.mimeType,
+            sizeBytes = 0L, relativePath = null,
+            sampleRateHz = song.sampleRateHz,
+            bitDepth = song.bitDepth,
+            channelCount = song.channelCount,
+            bitrateBps = song.bitrateKbps?.takeIf { it in 1..100_000 }?.times(1000),
+            sourceFormatLabel = sourceFormat,
+            networkStreamLabel = client?.streamFormatLabel(song.mimeType),
+            networkSongId = song.id
         )
     }
 
@@ -310,7 +357,7 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         val client = networkLibrary.client ?: return
         val entries = com.mokamusic.player.network.NetworkQueuePlan.build(selectedSong, songs)
         if (entries.isEmpty()) return
-        val queue = entries.map { networkMusicTrack(it, client.streamUri(it.id)) }
+        val queue = entries.map { networkMusicTrack(it, client.streamUri(it.id, it.mimeType)) }
             .distinctBy { it.id }
         val selectedId = -(selectedSong.id.hashCode().toLong() and 0x7fffffffL) - 1L
         val selected = queue.firstOrNull { it.id == selectedId } ?: return
@@ -320,11 +367,68 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         playFromQueue(selected, queue, shuffle)
     }
 
+    /** One Media3 playlist can alternate local files and Navidrome streams.
+     * Fetch a bounded random sample from the server rather than walking every album.
+     * Local files stay local; network URLs are generated only for selected songs.
+     */
+    fun shuffleDeviceAndNavidrome() {
+        val library = networkLibrary
+        val client = library.client ?: run {
+            library.mixedShuffleStatus = "Connect Navidrome in Settings first."
+            return
+        }
+        val localTracks = _uiState.value.tracks
+        if (localTracks.isEmpty()) {
+            library.mixedShuffleStatus = "No device tracks loaded. Scan your device library first."
+            return
+        }
+        if (library.mixedShuffleBusy) return
+        viewModelScope.launch {
+            library.mixedShuffleBusy = true
+            library.mixedShuffleStatus = "Choosing music from Navidrome…"
+            try {
+                // Balanced when possible; Subsonic caps random songs at 500.
+                val remoteSongs = withContext(Dispatchers.IO) {
+                    client.randomSongs(localTracks.size.coerceIn(1, 500))
+                }
+                if (library.client !== client) {
+                    library.mixedShuffleStatus = "Navidrome account changed. Try again."
+                    return@launch
+                }
+                if (remoteSongs.isEmpty()) {
+                    library.mixedShuffleStatus = "Navidrome returned no songs; mixed shuffle wasn't started."
+                    return@launch
+                }
+                val remoteTracks = remoteSongs.map {
+                    networkMusicTrack(it, client.streamUri(it.id, it.mimeType))
+                }
+                    .distinctBy { it.id }
+                val mixedQueue = (localTracks + remoteTracks).distinctBy { it.id }
+                networkQueueTracks.clear()
+                remoteTracks.forEach { networkQueueTracks[it.id] = it }
+                networkCurrentTrack = remoteTracks.firstOrNull()
+                playQueue(mixedQueue, shuffle = true)
+                library.mixedShuffleStatus =
+                    "Shuffling ${localTracks.size} device + ${remoteTracks.size} Navidrome tracks."
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Exception text might contain a signed Subsonic URL. Never display or log it.
+                library.mixedShuffleStatus =
+                    "Couldn't load Navidrome songs. Check Tailscale or your server connection."
+            } finally {
+                library.mixedShuffleBusy = false
+            }
+        }
+    }
+
     fun play(track: MusicTrack) {
         playFromQueue(track, _uiState.value.tracks.ifEmpty { listOf(track) })
     }
 
     fun playFromQueue(track: MusicTrack, queue: List<MusicTrack>, shuffle: Boolean = false) {
+        networkLibrary.playbackStatus = null
+        _uiState.value = _uiState.value.copy(networkPlaybackError = null)
         val cleanQueue = queue.distinctBy { it.id }.ifEmpty { listOf(track) }
         val mediaController = controller
         if (mediaController == null) {
@@ -895,6 +999,12 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         }
         _uiState.value = _uiState.value.copy(
             currentTrack = track,
+            // Clear the previous track's technical data immediately on transitions.
+            technical = if (changedTrack) AudioTechnicalMetadata(
+                sampleRateHz = track?.sampleRateHz,
+                bitDepth = track?.bitDepth,
+                bitrate = track?.bitrateBps
+            ) else _uiState.value.technical,
             isPlaying = player.isPlaying,
             positionMs = player.currentPosition.coerceAtLeast(0L),
             durationMs = safeDuration(player.duration),
@@ -910,8 +1020,30 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         if ((changedTrack || readTechnical) && track != null) {
             technicalJob?.cancel()
             technicalJob = viewModelScope.launch {
-                val tech = technicalReader.read(track)
-                if (_uiState.value.currentTrack?.id == track.id) {
+                val known = technicalReader.read(track)
+                // Album/search entries can omit bit depth or sampling rate.
+                // Fetch the selected song's richer metadata once it starts playing.
+                val songId = track.networkSongId
+                val activeClient = networkLibrary.client
+                val details = if (songId != null && activeClient != null &&
+                    (known.sampleRateHz == null || known.bitDepth == null || known.bitrate == null)) {
+                    try {
+                        withContext(Dispatchers.IO) { activeClient.song(songId) }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // Keep the catalog values; never expose signed URLs or credentials.
+                        null
+                    }
+                } else null
+                val tech = AudioTechnicalMetadata(
+                    sampleRateHz = known.sampleRateHz ?: details?.sampleRateHz,
+                    bitDepth = known.bitDepth ?: details?.bitDepth,
+                    bitrate = known.bitrate
+                        ?: details?.bitrateKbps?.takeIf { it in 1..100_000 }?.times(1000)
+                )
+                if (_uiState.value.currentTrack?.id == track.id &&
+                    (songId == null || networkLibrary.client === activeClient)) {
                     _uiState.value = _uiState.value.copy(technical = tech)
                 }
             }
