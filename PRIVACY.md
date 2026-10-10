@@ -23,3 +23,19 @@ Diagnostics are generated locally. Exporting a diagnostic report happens only af
 ## Accounts and streaming
 
 Moka Beta does not require a streaming-service account and does not contain Apple Music, YouTube Music, TIDAL or other subscription-streaming authentication.
+
+
+## Beta 6 optional features (development branch)
+
+AutoEq model searches download a publicly available index from GitHub when you
+request a search; selecting a model downloads its profile from GitHub. The
+local library health audit inspects cached metadata and does not edit or upload
+audio files. Named-device DSP snapshots are stored only on the phone.
+
+The experimental Navidrome/Subsonic network option connects only when you enter
+a server URL and credentials. It requires HTTPS; the password is kept in app
+memory and is not saved. Requests and streams use the server's Subsonic
+salted-token authentication in the HTTPS URL. Authentication parameters may
+appear in server/proxy logs and must be protected by your server administrator.
+Disconnect or leave the screen to discard the in-memory session. Server music
+is streamed on demand; Moka does not automatically upload or sync local music.

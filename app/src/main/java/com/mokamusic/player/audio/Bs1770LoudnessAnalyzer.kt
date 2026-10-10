@@ -7,6 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.os.Build
 import android.util.Log
 import com.mokamusic.player.model.MusicTrack
 import java.nio.ByteBuffer
@@ -32,6 +33,10 @@ import kotlin.math.sqrt
  * rather than standards-certified dBTP. It is diagnostic; normalization is driven by loudness.
  */
 class Bs1770LoudnessAnalyzer(private val context: Context) {
+    private val backendPrefs = context.applicationContext.getSharedPreferences(
+        "moka_loudness_backend_order_v1", Context.MODE_PRIVATE
+    )
+
     data class Result(
         val integratedLufs: Float,
         val estimatedTruePeakDbtp: Float,
@@ -145,11 +150,23 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
 
     private fun analyzeWithExtractorOrCodec(track: MusicTrack): DecodedRaw {
         val failures = ArrayList<String>()
-        for ((path, factory) in listOf(
+        val formatKey = track.displayName.substringAfterLast('.', "unknown").lowercase()
+            .take(12) + "_" + Build.MANUFACTURER.lowercase().take(20)
+        val preferred = backendPrefs.getString(formatKey, null)
+        val factories: Map<String, () -> SampleSource> = mapOf(
             "Platform URI" to { openPlatformUri(track) },
             "Platform FD" to { openPlatformDescriptor(track) },
             "Media3 fallback" to { openMedia3(track) }
-        )) {
+        )
+        val ordered = LoudnessBackendOrder.select(
+            preferred = preferred,
+            samsungFlac = Build.MANUFACTURER.equals("samsung", true) &&
+                (formatKey.startsWith("flac") || track.mimeType?.contains("flac", true) == true)
+        )
+        Log.i(LOG_TAG, "extractor plan format=$formatKey preferred=${preferred ?: "none"} order=${ordered.joinToString(",")}")
+        for (path in ordered) {
+            val factory = factories.getValue(path)
+            val pathStartedMs = SystemClock.elapsedRealtime()
             try {
                 factory().use { source ->
                     val index = selectedAudioIndex(source)
@@ -161,19 +178,24 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
                         source.selectTrack(index)
                         val format = source.getTrackFormat(index)
                         val mime = format.getString(MediaFormat.KEY_MIME) ?: error("Audio MIME missing")
-                        if (mime.equals("audio/raw", ignoreCase = true)) {
-                            return DecodedRaw(analyzeRawExtractor(source, format), "$path raw PCM")
+                        val decoded = if (mime.equals("audio/raw", ignoreCase = true)) {
+                            DecodedRaw(analyzeRawExtractor(source, format), "$path raw PCM")
+                        } else {
+                            val codec = MediaCodec.createDecoderByType(mime)
+                            try {
+                                codec.configure(format, null, null, 0)
+                                codec.start()
+                                DecodedRaw(decodeCodec(codec, source), "$path codec")
+                            } finally {
+                                runCatching { codec.stop() }
+                                runCatching { codec.release() }
+                            }
                         }
-
-                        val codec = MediaCodec.createDecoderByType(mime)
-                        try {
-                            codec.configure(format, null, null, 0)
-                            codec.start()
-                            return DecodedRaw(decodeCodec(codec, source), "$path codec")
-                        } finally {
-                            runCatching { codec.stop() }
-                            runCatching { codec.release() }
-                        }
+                        backendPrefs.edit().putString(formatKey, path).apply()
+                        Log.i(LOG_TAG, "extractor success path=$path " +
+                            "elapsedMs=${SystemClock.elapsedRealtime() - pathStartedMs} " +
+                            "format=$formatKey")
+                        return decoded
                     }
                 }
             } catch (error: LoudnessAnalysisException) {
@@ -183,6 +205,9 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
             } catch (error: Exception) {
                 failures += "$path: ${error.javaClass.simpleName}: ${error.message}"
                 Log.w(LOG_TAG, "Extractor path failed path=$path name=${track.displayName}", error)
+            } finally {
+                Log.i(LOG_TAG, "extractor attempted path=$path elapsedMs=" +
+                    "${SystemClock.elapsedRealtime() - pathStartedMs} file=${track.displayName}")
             }
         }
         throw LoudnessAnalysisException(
@@ -231,54 +256,102 @@ class Bs1770LoudnessAnalyzer(private val context: Context) {
         var accumulator: LoudnessAccumulator? = null
         var encoding = AudioFormat.ENCODING_PCM_16BIT
         var channels = 2
+        var inputCount = 0L
+        var outputCount = 0L
+        var waitingMs = 0L
+        val startedMs = SystemClock.elapsedRealtime()
+        var lastProgressMs = startedMs
 
-        fun updateOutputFormat() {
-            val f = codec.outputFormat
-            val rate = f.intOrNull(MediaFormat.KEY_SAMPLE_RATE) ?: error("Decoder sample rate missing")
-            channels = f.intOrNull(MediaFormat.KEY_CHANNEL_COUNT) ?: error("Decoder channel count missing")
-            if (channels !in 1..2) throw LoudnessAnalysisException("UNSUPPORTED_CHANNELS", "Unsupported $channels-channel audio; loudness analyzer currently supports mono/stereo only", permanent = true)
-            encoding = f.intOrNull(MediaFormat.KEY_PCM_ENCODING) ?: AudioFormat.ENCODING_PCM_16BIT
-            accumulator = LoudnessAccumulator(rate, channels)
+        fun updateFormat() {
+            val format = codec.outputFormat
+            val rate = format.intOrNull(MediaFormat.KEY_SAMPLE_RATE) ?: error("Missing PCM sample rate")
+            val updatedChannels = format.intOrNull(MediaFormat.KEY_CHANNEL_COUNT) ?: error("Missing PCM channels")
+            if (updatedChannels !in 1..2) throw LoudnessAnalysisException(
+                "UNSUPPORTED_CHANNELS", "Unsupported $updatedChannels-channel audio", permanent = true
+            )
+            val updatedEncoding = format.intOrNull(MediaFormat.KEY_PCM_ENCODING)
+                ?: AudioFormat.ENCODING_PCM_16BIT
+            if (accumulator != null && (updatedChannels != channels || updatedEncoding != encoding)) {
+                throw LoudnessAnalysisException("FORMAT_CHANGED", "Midstream PCM layout changed", permanent = false)
+            }
+            channels = updatedChannels
+            encoding = updatedEncoding
+            if (accumulator == null) accumulator = LoudnessAccumulator(rate, channels)
+        }
+
+        fun receive(index: Int) {
+            if (accumulator == null) updateFormat()
+            try {
+                val output = codec.getOutputBuffer(index)
+                if (info.size > 0 && output != null) {
+                    val sampleBytes = bytesPerSample(encoding)
+                    output.position(info.offset)
+                    output.limit(info.offset + info.size)
+                    accumulator?.processPcm(
+                        output.slice().order(ByteOrder.LITTLE_ENDIAN), encoding, info.size / sampleBytes
+                    )
+                    outputCount++
+                }
+                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEnded = true
+            } finally {
+                codec.releaseOutputBuffer(index, false)
+            }
         }
 
         while (!outputEnded) {
-            if (!inputEnded) {
-                val inputIndex = codec.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
-                if (inputIndex >= 0) {
-                    val input = codec.getInputBuffer(inputIndex) ?: error("Decoder input missing")
-                    input.clear()
-                    val size = extractor.readSampleData(input, 0)
-                    if (size < 0) {
-                        codec.queueInputBuffer(inputIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        inputEnded = true
-                    } else {
-                        codec.queueInputBuffer(inputIndex, 0, size, extractor.sampleTime, 0)
-                        extractor.advance()
+            var progressed = false
+            // Queue as many compressed packets as the decoder can receive.
+            while (!inputEnded) {
+                val index = codec.dequeueInputBuffer(0)
+                if (index < 0) break
+                val buffer = codec.getInputBuffer(index) ?: error("Decoder input missing")
+                buffer.clear()
+                val size = extractor.readSampleData(buffer, 0)
+                if (size < 0) {
+                    codec.queueInputBuffer(index, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                    inputEnded = true
+                } else {
+                    codec.queueInputBuffer(index, 0, size, extractor.sampleTime.coerceAtLeast(0L), 0)
+                    extractor.advance()
+                    inputCount++
+                }
+                progressed = true
+                lastProgressMs = SystemClock.elapsedRealtime()
+            }
+            // Drain available output buffers without a blocking wait after every input packet.
+            while (!outputEnded) {
+                when (val index = codec.dequeueOutputBuffer(info, 0)) {
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> { updateFormat(); progressed = true }
+                    else -> {
+                        if (index < 0) break
+                        receive(index)
+                        progressed = true
+                        lastProgressMs = SystemClock.elapsedRealtime()
                     }
                 }
             }
-
-            when (val outputIndex = codec.dequeueOutputBuffer(info, DEQUEUE_TIMEOUT_US)) {
-                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> updateOutputFormat()
-                else -> if (outputIndex >= 0) {
-                    if (accumulator == null) updateOutputFormat()
-                    val output = codec.getOutputBuffer(outputIndex)
-                    if (info.size > 0 && output != null) {
-                        val bytesPerSample = bytesPerSample(encoding)
-                        val samples = info.size / bytesPerSample
-                        output.position(info.offset)
-                        output.limit(info.offset + info.size)
-                        accumulator?.processPcm(
-                            output.slice().order(ByteOrder.LITTLE_ENDIAN),
-                            encoding,
-                            samples
-                        )
+            // Only wait if neither input nor output made progress.
+            if (!outputEnded && !progressed) {
+                val at = SystemClock.elapsedRealtime()
+                when (val index = codec.dequeueOutputBuffer(info, DEQUEUE_TIMEOUT_US)) {
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> updateFormat()
+                    else -> if (index >= 0) {
+                        receive(index)
+                        lastProgressMs = SystemClock.elapsedRealtime()
                     }
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEnded = true
-                    codec.releaseOutputBuffer(outputIndex, false)
+                }
+                waitingMs += SystemClock.elapsedRealtime() - at
+                if (SystemClock.elapsedRealtime() - lastProgressMs >= 30_000L) {
+                    throw LoudnessAnalysisException(
+                        "DECODER_STALL", "Decoder made no progress for 30 seconds",
+                        permanent = false
+                    )
                 }
             }
         }
+
+        Log.i(LOG_TAG, "decoder throughput inputs=$inputCount outputs=$outputCount " +
+            "wallMs=${SystemClock.elapsedRealtime()-startedMs} idleWaitMs=$waitingMs")
         return (accumulator ?: error("Decoder produced no PCM")).finish()
     }
 

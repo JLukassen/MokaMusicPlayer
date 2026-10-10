@@ -8,6 +8,24 @@
 >
 > Beta 5 is for device testing, **not a Play Store–signed production release**. Its GitHub Actions unit tests and debug APK build passed; Pixel 8a and Samsung hardware regression testing remains in progress. Moka intentionally does not offer subscription streaming in the beta: it controls local playback and DSP without relying on a streaming provider's DRM, SDK or developer program.
 
+## Beta 6 integration testing (development branch)
+
+The experimental [beta06-autoeq-samsung](https://github.com/JLukassen/MokaMusicPlayer/tree/beta06-autoeq-samsung)
+branch contains a single **versionCode 27 / 4.0.0-beta06** test build. Its
+GitHub Actions artifact is a debug APK, not a published release.
+
+This branch adds:
+- Read-only local library audit for possible duplicates/incomplete metadata
+- Opt-in named-output DSP profile restoration (when Android supplies a distinct device name)
+- Android Auto MediaLibraryService with local songs/albums/artists/favorites
+- HTTPS-only Navidrome/Subsonic album browsing and experimental network playback
+- Samsung-focused offline loudness extractor ordering, remembered successful backend and stall diagnostics
+- AutoEq VDC and convolution search, and 20 built-in plus saved multimodal EQ presets
+
+**Testing before merge:** Samsung loudness runtime and LUFS parity, Pixel/USB
+safety, headphone switching, Android Auto DHU/vehicle, HTTPS server playback,
+app restarts and error handling. Nothing has been published or merged to master.
+
 ## Why Moka
 
 Moka follows one rule:

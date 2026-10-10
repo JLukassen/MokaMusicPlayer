@@ -30,6 +30,13 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import com.mokamusic.player.audio.dsp.AutoEqCatalog
+import com.mokamusic.player.audio.dsp.AutoEqMatch
+import com.mokamusic.player.audio.dsp.UserEqCurveStore
+import com.mokamusic.player.audio.dsp.BuiltInEqPresets
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,6 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -54,8 +62,10 @@ import com.mokamusic.player.data.ArtworkLoader
 import com.mokamusic.player.data.SavedQueueStore
 import com.mokamusic.player.data.UnicodeText
 import com.mokamusic.player.audio.UsbDspSafetyPolicy
+import com.mokamusic.player.audio.AudioOutputStatus
 import com.mokamusic.player.audio.dsp.DspSettings
 import com.mokamusic.player.audio.dsp.DspDeviceProfileStore
+import com.mokamusic.player.audio.dsp.HeadphoneProfileStore
 import com.mokamusic.player.audio.dsp.DspPresetId
 import com.mokamusic.player.audio.dsp.DspPresets
 import com.mokamusic.player.audio.dsp.RouteClass
@@ -105,9 +115,12 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
     val context = LocalContext.current
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var page by rememberSaveable { mutableIntStateOf(0) }
+    // The selected library tab survives navigation away from Library.
+    var libraryTab by rememberSaveable { mutableIntStateOf(0) }
     var search by rememberSaveable { mutableStateOf("") }
     val uiPrefs = remember { context.getSharedPreferences("moka_ui", Context.MODE_PRIVATE) }
     var onboardingSeen by rememberSaveable { mutableStateOf(uiPrefs.getBoolean("onboarding_seen", false)) }
+    val networkLibrary = viewModel.networkLibrary
 
     LaunchedEffect(openNowPlayingRequest) {
         if (openNowPlayingRequest > 0) page = 0
@@ -164,9 +177,11 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when {
-                !hasPermission -> PermissionScreen { launcher.launch(permission) }
+                !hasPermission && page != 1 && page != 4 -> PermissionScreen { launcher.launch(permission) }
                 page == 0 -> NowPlayingScreen(state, viewModel)
                 page == 1 -> LibraryScreen(
+                    selectedTab = libraryTab,
+                    onTabChange = { libraryTab = it },
                     tracks = state.tracks,
                     favoriteIds = state.favoriteIds,
                     isScanning = state.isScanning,
@@ -182,7 +197,13 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                     onPlayQueue = viewModel::playQueue,
                     onPlayNext = viewModel::playNext,
                     onAddToQueue = viewModel::addToQueue,
-                    onToggleFavorite = viewModel::toggleFavorite
+                    onToggleFavorite = viewModel::toggleFavorite,
+                    networkLibrary = networkLibrary,
+                    onPlayNetwork = viewModel::playNetworkQueue,
+                    onShuffleMixed = viewModel::shuffleDeviceAndNavidrome,
+                    onNetworkSettings = { page = 4 },
+                    localPermissionGranted = hasPermission,
+                    onRequestLocalPermission = { launcher.launch(permission) }
                 )
                 page == 2 -> SearchScreen(
                     state.tracks,
@@ -194,7 +215,7 @@ private fun MokaApp(viewModel: MokaViewModel, openNowPlayingRequest: Int) {
                     viewModel::addToQueue,
                     viewModel::toggleFavorite
                 )
-                page == 3 -> DspScreen()
+                page == 3 -> DspScreen(state.output)
                 else -> MoreScreen(state, viewModel)
             }
         }
@@ -264,6 +285,8 @@ private data class LibraryCollection(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LibraryScreen(
+    selectedTab: Int,
+    onTabChange: (Int) -> Unit,
     tracks: List<MusicTrack>,
     favoriteIds: Set<Long>,
     isScanning: Boolean,
@@ -279,9 +302,15 @@ private fun LibraryScreen(
     onPlayQueue: (List<MusicTrack>, Boolean) -> Unit,
     onPlayNext: (MusicTrack) -> Unit,
     onAddToQueue: (MusicTrack) -> Unit,
-    onToggleFavorite: (MusicTrack) -> Unit
+    onToggleFavorite: (MusicTrack) -> Unit,
+    networkLibrary: NetworkLibraryState,
+    onPlayNetwork: (com.mokamusic.player.network.NetworkSong, List<com.mokamusic.player.network.NetworkSong>, Boolean) -> Unit,
+    onShuffleMixed: () -> Unit,
+    onNetworkSettings: () -> Unit,
+    localPermissionGranted: Boolean,
+    onRequestLocalPermission: () -> Unit
 ) {
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    val tab = selectedTab
     var selectedCollection by rememberSaveable { mutableStateOf<String?>(null) }
     var trackMode by rememberSaveable { mutableIntStateOf(0) } // 0 all, 1 recent, 2 favorites
 
@@ -290,7 +319,45 @@ private fun LibraryScreen(
     val genreGroups = remember(tracks) { tracks.groupBy { normalizedGenre(it) } }
 
     val selected = selectedCollection?.let(::decodeCollection)
-    if (selected != null) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text("Moka", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+                Text("${tracks.size} tracks · ${albumGroups.size} albums · ${artistGroups.size} artists · ${genreGroups.size} genres")
+            }
+            IconButton(onClick = onRescan, enabled = !isScanning && localPermissionGranted && tab != 4) {
+                if (isScanning) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                else Icon(Icons.Default.Refresh, "Refresh library", tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+
+        // Explicit music-source switch avoids burying Navidrome offscreen in the tab strip.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilterChip(
+                selected = tab != 4,
+                onClick = { selectedCollection = null; onTabChange(0) },
+                label = { Text("Device music") }
+            )
+            FilterChip(
+                selected = tab == 4,
+                onClick = { selectedCollection = null; onTabChange(4) },
+                label = { Text("Network · Navidrome") }
+            )
+        }
+
+        if (tab != 4) {
+            NetworkMixedShuffleButton(networkLibrary, tracks.size, onShuffleMixed)
+        }
+
+        if (selected != null && tab != 4) {
         val collectionTracks = when (selected.type) {
             LibraryCollectionType.ALBUM -> albumGroups[selected.key].orEmpty()
             LibraryCollectionType.ARTIST -> artistGroups[selected.key].orEmpty()
@@ -309,32 +376,27 @@ private fun LibraryScreen(
             onAddToQueue = onAddToQueue,
             onToggleFavorite = onToggleFavorite
         )
-        return
+            return@Column
     }
 
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column {
-                Text("Moka", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-                Text("${tracks.size} tracks · ${albumGroups.size} albums · ${artistGroups.size} artists · ${genreGroups.size} genres")
-            }
-            IconButton(onClick = onRescan, enabled = !isScanning) {
-                if (isScanning) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                else Icon(Icons.Default.Refresh, "Refresh library", tint = MaterialTheme.colorScheme.primary)
+        if (tab != 4) {
+            PrimaryScrollableTabRow(selectedTabIndex = tab, edgePadding = 0.dp) {
+                listOf("Tracks", "Albums", "Artists", "Genres").forEachIndexed { index, title ->
+                    Tab(
+                        selected = tab == index,
+                        onClick = { selectedCollection = null; onTabChange(index) },
+                        text = { Text(title) }
+                    )
+                }
             }
         }
 
-        PrimaryTabRow(selectedTabIndex = tab) {
-            listOf("Tracks", "Albums", "Artists", "Genres").forEachIndexed { index, title ->
-                Tab(selected = tab == index, onClick = { tab = index }, text = { Text(title) })
-            }
+        if (!localPermissionGranted && tab != 4) {
+            PermissionScreen(onGrant = onRequestLocalPermission)
+            return@Column
         }
 
-        if (isScanning) {
+        if (isScanning && tab != 4) {
             val progress = if (scanTotal > 0) scanCompleted.toFloat() / scanTotal.toFloat() else 0f
             LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
             Text(
@@ -432,6 +494,13 @@ private fun LibraryScreen(
                 onClick = { entry ->
                     selectedCollection = encodeCollection(LibraryCollectionType.GENRE, entry.key, entry.key)
                 }
+            )
+            4 -> NetworkLibraryScreen(
+                state = networkLibrary,
+                onPlay = onPlayNetwork,
+                onOpenSettings = onNetworkSettings,
+                deviceTrackCount = tracks.size,
+                onShuffleMixed = onShuffleMixed
             )
         }
     }
@@ -901,6 +970,14 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        state.networkPlaybackError?.let { error ->
+            Text(
+                error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+            )
+        }
         Spacer(Modifier.height(12.dp))
         Row(
             Modifier.fillMaxWidth(),
@@ -1019,9 +1096,14 @@ private fun NowPlayingScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 if (showSignal) {
                     HorizontalDivider(Modifier.padding(vertical = 12.dp))
                     SignalRow("Source", track.formatLabel)
-                    SignalRow("Sample rate", tech.sampleRateHz?.let(::formatSampleRate) ?: "Reading…")
-                    SignalRow("Bit depth", tech.bitDepth?.let { "$it-bit" } ?: "Unknown")
-                    SignalRow("Bitrate", tech.bitrate?.let { "${it / 1000} kbps" } ?: "Unknown")
+                    track.networkStreamLabel?.let { SignalRow("Network stream", it) }
+                    val sourceMissing = if (track.networkSongId != null) "Not provided" else "Reading…"
+                    SignalRow("Sample rate", tech.sampleRateHz?.let(::formatSampleRate) ?: sourceMissing)
+                    SignalRow("Bit depth", tech.bitDepth?.let { "$it-bit" } ?: "Not provided")
+                    SignalRow(
+                        if (track.networkStreamLabel?.contains("transcoded") == true) "Source bitrate" else "Bitrate",
+                        tech.bitrate?.let { "${it / 1000} kbps" } ?: "Not provided"
+                    )
                     SignalRow("Output", state.output.routeLabel)
                     SignalRow("Device", state.output.deviceName)
                     SignalRow("Playback engine", state.output.directEngineLabel ?: "Media3 Hi-Res")
@@ -1374,9 +1456,22 @@ private fun EqualizerPreview(gains: List<Float>) {
 
 @Composable
 private fun SignalRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, fontWeight = FontWeight.Medium)
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            value,
+            modifier = Modifier.weight(1f),
+            textAlign = TextAlign.End,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 
@@ -1414,7 +1509,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 )
                 Spacer(Modifier.width(16.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Moka 4.0 Beta 5", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                    Text("Moka 4.0 Beta 6 · dev", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                     Text("v$versionName · Local-first hi-fi", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                     Text("Music first. DSP when you want it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -1451,8 +1546,12 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
             }
         }
 
+        item { SectionLabel("NETWORK MUSIC") }
+        item { NetworkAccountSettings(viewModel.networkLibrary) }
+
         item { SectionLabel("LIBRARY & METADATA") }
         item { LibraryMaintenanceCard(state, viewModel) }
+        item { LibraryAuditCard(state.tracks, onLibraryChanged = { viewModel.scanLibrary() }) }
         item { MetadataDisplayPreferenceCard(state, viewModel) }
         item { MetadataEnrichmentCard(state, viewModel) }
         item { LoudnessAnalysisCard(state, viewModel) }
@@ -1688,13 +1787,39 @@ private fun LoudnessAnalysisCard(state: MokaUiState, viewModel: MokaViewModel) {
 }
 
 @Composable
-private fun DspScreen() {
+private fun DspScreen(outputStatus: AudioOutputStatus) {
     val context = LocalContext.current
     val store = remember { DspSettingsStore(context.applicationContext) }
     val profileStore = remember { DspDeviceProfileStore(context.applicationContext) }
+    val headphoneStore = remember { HeadphoneProfileStore(context.applicationContext) }
+    val headphoneKey = HeadphoneProfileStore.identity(outputStatus.routeLabel, outputStatus.deviceName)
+    var headphoneAutoEnabled by remember { mutableStateOf(headphoneStore.enabled) }
+    var hasHeadphoneProfile by remember(headphoneKey) {
+        mutableStateOf(headphoneKey?.let(headphoneStore::has) ?: false)
+    }
     var settings by remember { mutableStateOf(store.load()) }
     var autoProfilesEnabled by remember { mutableStateOf(profileStore.enabled) }
     val pixelUsbDspGuard = UsbDspSafetyPolicy.requiresDsp(context)
+    val autoEqScope=rememberCoroutineScope()
+    var autoEqQuery by remember { mutableStateOf("") }
+    var autoEqList by remember { mutableStateOf<List<AutoEqMatch>>(emptyList()) }
+    var autoEqBusy by remember { mutableStateOf(false) }
+    var autoEqStatus by remember { mutableStateOf<String?>(null) }
+    var autoEqDialog by remember { mutableStateOf<String?>(null) }
+    var autoEqRequest by remember { mutableIntStateOf(0) }
+    val savedEqStore = remember { UserEqCurveStore(context.applicationContext) }
+    var savedCurves by remember { mutableStateOf(savedEqStore.list()) }
+    var eqPresetName by remember { mutableStateOf("") }
+    var eqPresetMessage by remember { mutableStateOf<String?>(null) }
+    var eqPresetMenu by remember { mutableStateOf(false) }
+
+    fun clearAutoEq() {
+        autoEqRequest++
+        autoEqQuery = ""
+        autoEqList = emptyList()
+        autoEqStatus = null
+        autoEqBusy = false
+    }
 
     fun save(next: DspSettings) {
         store.save(next)
@@ -1734,6 +1859,48 @@ private fun DspScreen() {
             Text("Shape the sound. Moka keeps every active stage visible.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(12.dp))
             DspStatusBanner(settings = settings, pixelUsbDspGuard = pixelUsbDspGuard)
+        }
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Automatic headphone profiles",
+                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Remember your current VDC, convolver, EQ and output settings for this exact " +
+                            "named playback device. Profiles apply automatically when the same " +
+                            "device is connected again.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text("Output: ${outputStatus.deviceName} · ${outputStatus.routeLabel}")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Auto-restore saved device profiles", modifier = Modifier.weight(1f))
+                        Switch(checked = headphoneAutoEnabled, onCheckedChange = {
+                            headphoneAutoEnabled = it
+                            headphoneStore.enabled = it
+                        })
+                    }
+                    if (headphoneKey == null) {
+                        Text(
+                            "This output doesn't provide a unique headphone identity. " +
+                                "Use the manual EQ/VDC presets instead of guessing which headphones are connected.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    } else {
+                        Text(if (hasHeadphoneProfile) "Saved profile available for this output"
+                            else "No profile saved for this output")
+                        Button(onClick = {
+                            headphoneStore.save(headphoneKey, store.load())
+                            hasHeadphoneProfile = true
+                        }) { Text("Save current DSP for this device") }
+                        if (hasHeadphoneProfile) {
+                            OutlinedButton(onClick = {
+                                headphoneStore.remove(headphoneKey)
+                                hasHeadphoneProfile = false
+                            }) { Text("Forget this device profile") }
+                        }
+                    }
+                }
+            }
         }
         item {
             ElevatedCard(Modifier.fillMaxWidth()) {
@@ -1886,6 +2053,94 @@ private fun DspScreen() {
                     Spacer(Modifier.height(12.dp))
                     EqualizerPreview(settings.eqGainsDb)
                     Spacer(Modifier.height(14.dp))
+                    Text("EQ presets", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Pick a sound style or a saved curve. Built-ins use your current FIR/IIR mode.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Box {
+                        FilledTonalButton(
+                            onClick = { eqPresetMenu = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Presets… · " +
+                                    (BuiltInEqPresets.matching(settings.eqGainsDb)?.name ?: "Custom"),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = eqPresetMenu,
+                            onDismissRequest = { eqPresetMenu = false }
+                        ) {
+                            Text(
+                                "BUILT-IN",
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            BuiltInEqPresets.all.forEach { preset ->
+                                DropdownMenuItem(
+                                    text = { Text(preset.name) },
+                                    onClick = {
+                                        save(preset.applyTo(settings))
+                                        eqPresetMessage = "Applied " + preset.name + " EQ"
+                                        eqPresetMenu = false
+                                    }
+                                )
+                            }
+                            if (savedCurves.isNotEmpty()) {
+                                HorizontalDivider()
+                                Text(
+                                    "MY SAVED PRESETS",
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                savedCurves.forEach { curve ->
+                                    DropdownMenuItem(
+                                        text = { Text(curve.name) },
+                                        onClick = {
+                                            save(curve.applyTo(settings))
+                                            eqPresetName = curve.name
+                                            eqPresetMessage = "Loaded " + curve.name
+                                            eqPresetMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = eqPresetName,
+                        onValueChange = { eqPresetName = it; eqPresetMessage = null },
+                        label = { Text("EQ preset name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            enabled = eqPresetName.trim().isNotEmpty() && eqPresetName.trim().length <= 40,
+                            onClick = {
+                                runCatching { savedEqStore.save(eqPresetName, settings) }
+                                    .onSuccess { savedCurves = it; eqPresetMessage = "Saved EQ preset" }
+                                    .onFailure { eqPresetMessage = it.message ?: "Unable to save preset" }
+                            }
+                        ) { Text("Save EQ") }
+                        OutlinedButton(
+                            enabled = savedCurves.any { it.name == eqPresetName.trim() },
+                            onClick = {
+                                savedCurves = savedEqStore.delete(eqPresetName.trim())
+                                eqPresetMessage = "Deleted EQ preset"
+                            }
+                        ) { Text("Delete") }
+                    }
+                    eqPresetMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    Spacer(Modifier.height(14.dp))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         var modeMenu by remember { mutableStateOf(false) }
                         Box(Modifier.weight(1f)) {
@@ -1961,6 +2216,10 @@ private fun DspScreen() {
                     Button(onClick = { ddcPicker.launch(arrayOf("text/*", "application/octet-stream", "*/*")) }) {
                         Icon(Icons.Default.FolderOpen, null); Spacer(Modifier.width(8.dp)); Text("Choose .vdc")
                     }
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(onClick = { clearAutoEq(); autoEqDialog = "VDC" }) {
+                        Text("Find headphone correction (AutoEq)")
+                    }
                 }
             }
         }
@@ -1982,6 +2241,9 @@ private fun DspScreen() {
                     Spacer(Modifier.height(10.dp))
                     Button(onClick = { irsPicker.launch(arrayOf("audio/*", "application/octet-stream", "*/*")) }) {
                         Icon(Icons.Default.GraphicEq, null); Spacer(Modifier.width(8.dp)); Text("Choose impulse response")
+                    }
+                    OutlinedButton(onClick = { clearAutoEq(); autoEqDialog = "IR" }) {
+                        Text("Find headphone impulse (AutoEq)")
                     }
                     Spacer(Modifier.height(8.dp))
                     Text("Convolver gain  ${"%.1f".format(settings.convolverGainDb)} dB")
@@ -2035,6 +2297,122 @@ private fun DspScreen() {
             Text("Changes apply live during playback. Now Playing shows the active route and DSP state; source bit-perfect is intentionally false whenever Moka is tuning the samples.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(80.dp))
         }
+    }
+
+    if (autoEqDialog != null) {
+        val mode = autoEqDialog ?: "VDC"
+        AlertDialog(
+            onDismissRequest = { clearAutoEq(); autoEqDialog = null },
+            title = { Text(if (mode == "IR") "AutoEq convolver search" else "AutoEq headphone correction") },
+            text = {
+                Column {
+                    Text("Choose a matching headphone model and measurement source.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        value = autoEqQuery,
+                        onValueChange = {
+                            autoEqQuery = it
+                            autoEqRequest++
+                            autoEqList = emptyList()
+                            autoEqStatus = null
+                            autoEqBusy = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Headphone model") },
+                        singleLine = true,
+                        trailingIcon = {
+                            if (autoEqQuery.isNotEmpty()) {
+                                IconButton(onClick = { clearAutoEq() }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Clear query")
+                                }
+                            }
+                        }
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            enabled = !autoEqBusy && autoEqQuery.trim().length >= 3,
+                            onClick = {
+                                val query = autoEqQuery.trim()
+                                val request = ++autoEqRequest
+                                autoEqList = emptyList()
+                                autoEqBusy = true
+                                autoEqStatus = null
+                                autoEqScope.launch {
+                                    val result = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            AutoEqCatalog.search(context.applicationContext, query)
+                                        }
+                                    }
+                                    if (request == autoEqRequest && autoEqDialog == mode) {
+                                        result.onSuccess {
+                                            autoEqList = it
+                                            if (it.isEmpty()) autoEqStatus = "No matching profiles"
+                                        }.onFailure { autoEqStatus = it.message ?: "Search failed" }
+                                        autoEqBusy = false
+                                    }
+                                }
+                            }
+                        ) { Text(if (autoEqBusy) "Loading…" else "Search") }
+                        TextButton(onClick = { clearAutoEq() }) { Text("Clear") }
+                    }
+                    autoEqStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                        autoEqList.forEach { match ->
+                            TextButton(enabled = !autoEqBusy, onClick = {
+                                val request = ++autoEqRequest
+                                autoEqBusy = true
+                                autoEqStatus = "Downloading ${match.model}…"
+                                autoEqScope.launch {
+                                    val result = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            if (mode == "IR") {
+                                                AutoEqCatalog.importImpulse(context.applicationContext, match)
+                                            } else {
+                                                AutoEqCatalog.importVdc(context.applicationContext, match)
+                                            }
+                                        }
+                                    }
+                                    if (request == autoEqRequest && autoEqDialog == mode) {
+                                        result.onSuccess { uri ->
+                                            if (mode == "IR") {
+                                                save(settings.copy(
+                                                    masterEnabled = true,
+                                                    autoHeadroomEnabled = true,
+                                                    limiterEnabled = true,
+                                                    eqEnabled = false,
+                                                    ddcEnabled = false,
+                                                    convolverEnabled = true,
+                                                    convolverUri = uri.toString(),
+                                                    convolverName = "${match.model} · ${match.source}"
+                                                ))
+                                            } else {
+                                                save(settings.copy(
+                                                    masterEnabled = true,
+                                                    autoHeadroomEnabled = true,
+                                                    limiterEnabled = true,
+                                                    eqEnabled = false,
+                                                    convolverEnabled = false,
+                                                    ddcEnabled = true,
+                                                    ddcUri = uri.toString(),
+                                                    ddcName = "${match.model} · ${match.source}"
+                                                ))
+                                            }
+                                            clearAutoEq()
+                                            autoEqDialog = null
+                                        }.onFailure {
+                                            autoEqStatus = "Import failed: ${it.message}"
+                                            autoEqBusy = false
+                                        }
+                                    }
+                                }
+                            }) { Text("${match.model} · ${match.source}") }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { clearAutoEq(); autoEqDialog = null }) { Text("Close") }
+            }
+        )
     }
 }
 

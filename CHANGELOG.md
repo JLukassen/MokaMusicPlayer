@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — expanded multimodal EQ sound presets
+- Added 20 built-in musical EQ curves: Acoustic, Bass, Beats, Classic, Clear, Deep Bass, Dubstep, Electronic, Flat, Hardstyle, Hip-Hop, Jazz, Metal, Movie, Pop, R&B, Rock, Vocal Booster, Warm and Moka Reference.
+- Consolidated all built-in and named saved EQ curves in a single scrollable Presets dropdown; selection dismisses the menu.
+- Selecting a built-in enables EQ while preserving the current FIR/IIR engine, interpolator and all other DSP stages.
+- Presets are independently tuned for Moka's 15 bands, not copied proprietary profiles; Samsung loudness analysis code is unchanged.
+
+
+## Unreleased — headphone AutoEq discovery and Samsung decoder pipelining
+- Browse AutoEq's public headphone index on demand from ViPER-DDC and import selected parametric profiles into local VDC coefficients.
+- Offline MediaCodec loudness analyzer now fills available input buffers and drains decoded PCM in batches instead of waiting for each input/output pair.
+- Adds decoder throughput telemetry for Samsung diagnostics. Sound accuracy and device speed still require physical device validation.
+- Do not redistribute third-party AutoEq measurements without reviewing their rights.
+
+
 ## 4.0.0-beta05 — Samsung Library Performance
 - Cache artwork misses across app restarts with file-fingerprint invalidation and expiration (24 hours local, 5 minutes for optional online artwork).
 - Avoid retrying missing artwork at every thumbnail size and on every new screen.
