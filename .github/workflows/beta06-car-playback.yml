@@ -4,7 +4,7 @@ on:
   push:
     branches: [beta06-car-playback-transitions, beta06-unified-navidrome-shuffle]
   pull_request:
-    branches: [beta061-network-duplicate-safety]
+    branches: [beta061-network-duplicate-safety, beta06-unified-navidrome-shuffle]
   workflow_dispatch:
 
 permissions:

@@ -24,6 +24,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mokamusic.player.network.NetworkAlbum
 import com.mokamusic.player.network.NetworkSong
+import com.mokamusic.player.network.NetworkStreamQuality
 import com.mokamusic.player.network.SubsonicLibraryClient
 import com.mokamusic.player.network.SubsonicHttpException
 import java.io.IOException
@@ -54,6 +55,12 @@ internal class NetworkLibraryState(
         private set
     var password by mutableStateOf("")
     var rememberLogin by mutableStateOf(prefs.getBoolean("remember_login", true))
+        private set
+    var streamQuality by mutableStateOf(
+        runCatching {
+            NetworkStreamQuality.valueOf(prefs.getString("stream_quality", "ORIGINAL") ?: "ORIGINAL")
+        }.getOrDefault(NetworkStreamQuality.ORIGINAL)
+    )
         private set
     var search by mutableStateOf("")
     var category by mutableIntStateOf(0) // 0 Tracks, 1 Albums, 2 Artists, 3 Genres
@@ -143,6 +150,13 @@ internal class NetworkLibraryState(
         prefs.edit().putString("username", value).apply()
     }
 
+    fun updateStreamQuality(value: NetworkStreamQuality) {
+        streamQuality = value
+        prefs.edit().putString("stream_quality", value.name).apply()
+        client?.streamQuality = value
+        streamCheckStatus = null
+    }
+
     fun updateRememberLogin(value: Boolean) {
         rememberLogin = value
         prefs.edit().putBoolean("remember_login", value).apply()
@@ -179,7 +193,9 @@ internal class NetworkLibraryState(
                 status = "Enter your password. The saved login may no longer be available."
                 return
             }
-            val candidate = SubsonicLibraryClient(target, account, secret)
+            val candidate = SubsonicLibraryClient(target, account, secret).apply {
+                streamQuality = this@NetworkLibraryState.streamQuality
+            }
             val first = withContext(Dispatchers.IO) {
                 candidate.ping()
                 candidate.albums(offset = 0, size = PAGE_SIZE)

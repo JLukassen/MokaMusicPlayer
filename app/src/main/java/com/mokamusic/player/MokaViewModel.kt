@@ -317,12 +317,28 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
     private fun networkMusicTrack(song: NetworkSong, url: Uri): MusicTrack {
         // Keep remote IDs in the negative range to avoid colliding with MediaStore IDs.
         val remoteId = -(song.id.hashCode().toLong() and 0x7fffffffL) - 1L
+        val sourceFormat = song.suffix?.uppercase() ?: when {
+            song.mimeType?.contains("flac", true) == true -> "FLAC"
+            song.mimeType?.contains("wav", true) == true -> "WAV"
+            song.mimeType?.contains("mpeg", true) == true -> "MP3"
+            song.mimeType?.contains("opus", true) == true -> "OPUS"
+            song.mimeType?.contains("wma", true) == true -> "WMA"
+            else -> null
+        }
+        val client = networkLibrary.client
         return MusicTrack(
             id = remoteId, uri = url, displayName = song.title,
             title = song.title, artist = song.artist, album = song.album,
             albumId = -1L, durationMs = song.durationSeconds.coerceAtLeast(0) * 1000L,
-            mimeType = networkLibrary.client?.playbackMimeType(song.mimeType) ?: song.mimeType,
-            sizeBytes = 0L, relativePath = null
+            mimeType = client?.playbackMimeType(song.mimeType) ?: song.mimeType,
+            sizeBytes = 0L, relativePath = null,
+            sampleRateHz = song.sampleRateHz,
+            bitDepth = song.bitDepth,
+            channelCount = song.channelCount,
+            bitrateBps = song.bitrateKbps?.takeIf { it in 1..100_000 }?.times(1000),
+            sourceFormatLabel = sourceFormat,
+            networkStreamLabel = client?.streamFormatLabel(song.mimeType),
+            networkSongId = song.id
         )
     }
 
@@ -983,6 +999,12 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         }
         _uiState.value = _uiState.value.copy(
             currentTrack = track,
+            // Clear the previous track's technical data immediately on transitions.
+            technical = if (changedTrack) AudioTechnicalMetadata(
+                sampleRateHz = track?.sampleRateHz,
+                bitDepth = track?.bitDepth,
+                bitrate = track?.bitrateBps
+            ) else _uiState.value.technical,
             isPlaying = player.isPlaying,
             positionMs = player.currentPosition.coerceAtLeast(0L),
             durationMs = safeDuration(player.duration),
@@ -998,8 +1020,30 @@ class MokaViewModel(application: Application) : AndroidViewModel(application) {
         if ((changedTrack || readTechnical) && track != null) {
             technicalJob?.cancel()
             technicalJob = viewModelScope.launch {
-                val tech = technicalReader.read(track)
-                if (_uiState.value.currentTrack?.id == track.id) {
+                val known = technicalReader.read(track)
+                // Album/search entries can omit bit depth or sampling rate.
+                // Fetch the selected song's richer metadata once it starts playing.
+                val songId = track.networkSongId
+                val activeClient = networkLibrary.client
+                val details = if (songId != null && activeClient != null &&
+                    (known.sampleRateHz == null || known.bitDepth == null || known.bitrate == null)) {
+                    try {
+                        withContext(Dispatchers.IO) { activeClient.song(songId) }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // Keep the catalog values; never expose signed URLs or credentials.
+                        null
+                    }
+                } else null
+                val tech = AudioTechnicalMetadata(
+                    sampleRateHz = known.sampleRateHz ?: details?.sampleRateHz,
+                    bitDepth = known.bitDepth ?: details?.bitDepth,
+                    bitrate = known.bitrate
+                        ?: details?.bitrateKbps?.takeIf { it in 1..100_000 }?.times(1000)
+                )
+                if (_uiState.value.currentTrack?.id == track.id &&
+                    (songId == null || networkLibrary.client === activeClient)) {
                     _uiState.value = _uiState.value.copy(technical = tech)
                 }
             }
