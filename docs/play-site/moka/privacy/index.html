@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="index,follow">
+  <title>Moka Music Player — Privacy Policy | Yoo Shastan</title>
+  <meta name="description" content="Privacy information for Moka Music Player, an independent Android audio player from Yoo Shastan.">
+  <style>
+    :root{color-scheme:dark;--bg:#11151a;--text:#f2f0eb;--muted:#b6c0cc;--accent:#e9a56c;--line:#3d454f}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.7 system-ui,-apple-system,sans-serif}
+    main{max-width:780px;margin:auto;padding:52px 24px 90px}h1{font-size:clamp(30px,5vw,44px);line-height:1.15}h2{font-size:21px;margin-top:34px}
+    p,li{color:var(--muted)}a{color:var(--accent)}header{border-bottom:1px solid var(--line);padding:0 0 26px}header small{letter-spacing:.12em;color:var(--accent);font-weight:700;text-transform:uppercase}
+    .notice{border:1px solid #9e783e;padding:14px;border-radius:8px}ul{padding-left:22px}footer{margin-top:40px;border-top:1px solid var(--line);padding-top:24px;font-size:14px}
+  </style>
+</head>
+<body>
+<main>
+<header><small>Yoo Shastan · Android applications</small>
+<h1>Moka Music Player — Privacy Policy</h1>
+<p>Last revised: October 16, 2026</p>
+</header>
+<p class="notice"><strong>Publication checklist:</strong> Replace <code>SUPPORT_EMAIL_REQUIRED</code> with a working brand support address and verify this page against the shipped app before making the page public or submitting its URL to Google Play.</p>
+<h2>How Moka works</h2>
+<p>Moka Music Player is a local-first Android music player. It reads music and its metadata through Android's media permissions to display your library and play selected tracks. The developer does not automatically receive the audio files stored on your device. Audio processing, DSP, library scanning and optional offline loudness calculations run on your device.</p>
+<h2>Optional internet services</h2>
+<ul>
+<li><strong>Navidrome/Subsonic:</strong> If you choose to sign in to an HTTPS music server, Moka sends requests and streams audio to/from the server you selected. Server operators may see your username, IP address, requested music and authentication information in requests/logs. You control which server you use; Yoo Shastan does not operate that server by default.</li>
+<li><strong>MusicBrainz and artwork:</strong> If you initiate online metadata enrichment, Moka can send artist/album text to MusicBrainz and fetch matched artwork from the Cover Art Archive/Internet Archive. These services may receive standard request information such as your IP address.</li>
+<li><strong>AutoEq:</strong> If requested, Moka accesses GitHub-hosted public headphone indexes and profiles, which may involve standard HTTP request information sent to that host.</li>
+</ul>
+<h2>Saved login and local data</h2>
+<p>If you enable remembered Navidrome login, the selected server URL and username are stored locally on your phone, and the password is encrypted with a key managed by Android Keystore. The encrypted password file is excluded from Android's usual app backup. You can disconnect without deleting the remembered login or choose the forget-server control to delete the saved login.</p>
+<p>Library metadata, analysis results, preferences and selected DSP settings are stored on the phone. Normal app data can be cleared through Android settings; uninstalling also deletes app-private data subject to Android backup and restore behavior. Deleting the app does not delete music files stored outside its private data.</p>
+<h2>Diagnostics, analytics and advertising</h2>
+<p>Moka lets you export a diagnostics report when you explicitly request it. The report may contain device details, playback routes, local file metadata, recent errors and DSP settings. Moka does not automatically upload that report to Yoo Shastan. This release does not integrate an advertising SDK or developer-operated analytics account; requests to optional external services are described above.</p>
+<h2>Retention and security</h2>
+<p>The developer has no hosted database of users' local libraries or encrypted saved server credentials. On-device data remains until it is deleted through app controls, Android app storage management or uninstall; third-party servers follow their own data-retention rules. Moka uses HTTPS for optional Navidrome connections and Android Keystore for remembered passwords.</p>
+<h2>Contact</h2>
+<p>Privacy and support inquiries: <strong>SUPPORT_EMAIL_REQUIRED</strong>. Please do not send passwords, authentication tokens or private streaming URLs.</p>
+<footer>Yoo Shastan · Moka Music Player. No individual developer identity or personal portfolio links are required for this brand policy page.</footer>
+</main>
+</body>
+</html>
