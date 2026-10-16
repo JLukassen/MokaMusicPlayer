@@ -44,7 +44,7 @@ Key features:
 - local audio files remain read-only
 - consistent Moka espresso/bronze Material 3 interface with technical diagnostics kept behind an Advanced view
 
-## What's new in Beta 5
+## Earlier improvements: Beta 5
 
 This update focuses on **Samsung library browsing, metadata extraction and artwork responsiveness**, while keeping the validated playback/DSP path and the Pixel 8a USB-volume safety guard unchanged.
 
@@ -59,16 +59,16 @@ These are code-path improvements, not a guarantee of a particular load time on e
 
 ### Install or upgrade the test APK
 
-Download the [Beta 5 debug APK](https://github.com/JLukassen/MokaMusicPlayer/releases/download/v4.0.0-beta05/Moka-Music-Player-4.0.0-beta05-debug.apk). For an ADB installation on a connected Android device:
+Download the [Beta 6 debug APK](https://github.com/JLukassen/MokaMusicPlayer/releases/download/v4.0.0-beta06/Moka-Music-Player-4.0.0-beta06-debug.apk). For an ADB installation on a connected Android device:
 
 ```bash
 adb devices -l
-adb -s DEVICE_SERIAL install -r Moka-Music-Player-4.0.0-beta05-debug.apk
+adb -s DEVICE_SERIAL install -r Moka-Music-Player-4.0.0-beta06-debug.apk
 ```
 
 The `-r` flag preserves the installed app's data **when Android accepts the update and the signing certificates match**. Android will reject an upgrade if the existing Moka APK was signed with a different key. **Do not uninstall just to work around a signature mismatch** unless you have safely backed up any settings and analysis data you need.
 
-The GitHub-hosted APK is debug-signed, so it may not share a certificate with a locally built APK or a future signed production APK. Keep [Beta 4](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta04) available as a comparison build; switching between builds also requires a compatible signing certificate.
+The GitHub-hosted APK is debug-signed, so it may not share a certificate with a locally built APK or a future Play-signed APK. The [previous Beta 5](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta05) remains available for comparison.
 
 ---
 
@@ -324,7 +324,7 @@ adb devices -l
 adb -s DEVICE_SERIAL install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-A local debug APK can have a different signing key than the [published test APK](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta05); a mismatched update will be rejected. Do not discard app data solely to switch keys.
+A local debug APK can have a different signing key than the [published Beta 6 test APK](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta06); a mismatched update will be rejected. Do not discard app data solely to switch keys.
 
 To run the project-specific preflight checks:
 
@@ -332,7 +332,7 @@ To run the project-specific preflight checks:
 ./scripts/beta5-preflight.sh
 ```
 
-GitHub Actions also runs the unit-test and debug-APK build before tagging and publishing a prerelease. See [Beta 5's CI workflow](.github/workflows/beta05-release.yml). A successful CI build **does not replace physical-device testing or Android instrumentation runs**.
+GitHub Actions also runs unit tests and debug-APK builds for tagged test prereleases. See the [Beta 6 CI workflow](.github/workflows/beta06-release.yml). A successful CI build **does not replace physical-device testing or Android instrumentation runs**.
 
 USB regression testing, particularly the Pixel 8a safety guard:
 
@@ -401,6 +401,26 @@ adb -s DEVICE_SERIAL logcat -d | grep -iE \
 
 ---
 
+## Google Play publishing
+
+Moka's developer account is registered, but the GitHub test APK is **not** the file to upload to Google Play. Play distribution requires a separately **upload-signed Android App Bundle (AAB)** and enrollment in Play App Signing. Keep the upload keystore and its passwords off GitHub, and retain securely backed-up copies.
+
+Once a release upload key is configured locally (through the existing untracked `keystore.properties` signing setup), the build command is:
+
+```bash
+./gradlew :app:testDebugUnitTest :app:bundleRelease
+```
+
+The intended upload artifact is `app/build/outputs/bundle/release/app-release.aab`. Check its signature, native library 16 KB page-size compatibility, Play Console data-safety declarations, public privacy policy, required store assets, and internal-testing installation before production rollout. This README does not claim that the AAB has already been produced or accepted by Google Play.
+
+## Support Moka development
+
+Moka is independently developed. If the player is useful to you and you'd like to support continued maintenance and new features, **voluntary donations are welcome once a verified funding page is live**. Donating is never required to use Moka and does not unlock app features.
+
+A donation page is being set up. See the [funding setup guide](docs/FUNDING_SETUP.md) for Ko-fi and GitHub Sponsors instructions. After a real page URL has been verified, this section and GitHub's Sponsor button can link directly to it. No payment link is currently active in this README.
+
+---
+
 ## Privacy
 
 Moka is local-first. Local audio is not uploaded for playback, analysis or DSP.
@@ -413,7 +433,7 @@ See `PRIVACY.md`.
 
 ## Beta status and known limitations
 
-**v4.0.0-beta05 is a test prerelease**, not a stable or Play Store–signed release. Automated unit tests and debug assembly passed in GitHub Actions, but the new library/artwork changes still require Samsung and Pixel hardware verification.
+**v4.0.0-beta06 is a test prerelease**, not yet a Google Play release. Automated unit tests and APK builds passed on CI, and the developer reports sustained use of RC2.5 without recurring playback failures. Additional real-device, review-policy and upload-signing verification are needed before Play Store distribution.
 
 - **Loudness accuracy:** offline integrated LUFS uses a BS.1770-style analyzer, while the 4× inter-sample peak is an estimate, not a certified true-peak measurement.
 - **Interrupted background analysis:** per-track results and session state are persisted, but Android may pause or kill background processing; a dedicated durable foreground job is not yet implemented.
@@ -423,4 +443,4 @@ See `PRIVACY.md`.
 - **Release qualification:** physical-device playback, FLAC/WAV library browse/refresh, normalization, storage performance and long-running soak tests remain necessary. See [Beta checklist](BETA_CHECKLIST.md).
 - **Licensing audit:** transitive dependency notices and third-party DSP source provenance must be verified before a stable release. See [dependency license inventory](docs/release/DEPENDENCY_LICENSE_INVENTORY.md) and [DSP source provenance](docs/release/DSP_SOURCE_PROVENANCE.md).
 
-A beta can have documented limitations; Moka reports what it can verify and explicitly labels estimated or unsupported paths. See [changelog](CHANGELOG.md) for release-by-release changes and the [Beta 5 release](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta05) for the current APK.
+A beta can have documented limitations; Moka reports what it can verify and explicitly labels estimated or unsupported paths. See [changelog](CHANGELOG.md) for release-by-release changes and the [Beta 6 release](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta06) for the current APK.
