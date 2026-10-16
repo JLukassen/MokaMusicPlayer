@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.0.0-beta06 — Navidrome, DSP, and Playback Integration
+- Promote the field-tested Beta 6 RC2.5 feature set to versionCode 38 without changing the underlying audio processing path.
+- Integrate a scrollable, paged Navidrome/Subsonic network library with encrypted saved login, reconnect and HTTPS/Tailscale server access.
+- Improve network queueing, Next/Previous and mixed local + network shuffle; improve car playback and audio-focus/route transition diagnostics.
+- Prefer original/lossless Navidrome streams with visible source technical metadata; transcode WMA when required by Android's supported formats.
+- Include Android Auto browser integration, AutoEq and multimodal EQ presets, device-profile DSP settings and explicit local duplicate selection/deletion.
+- Keep audio-library safety: no unattended file deletion or automatic server-side retagging.
+- Publish Beta 6 as a **debug-signed GitHub test prerelease**, not a stable production-signed upgrade. Android upgrade signatures must match; do not uninstall an existing build with important data to work around a signature mismatch.
+- See [Beta 6 release notes](docs/BETA6_RELEASE_NOTES.md) for installation and testing guidance.
+
 ## Unreleased — expanded multimodal EQ sound presets
 - Added 20 built-in musical EQ curves: Acoustic, Bass, Beats, Classic, Clear, Deep Bass, Dubstep, Electronic, Flat, Hardstyle, Hip-Hop, Jazz, Metal, Movie, Pop, R&B, Rock, Vocal Booster, Warm and Moka Reference.
 - Consolidated all built-in and named saved EQ curves in a single scrollable Presets dropdown; selection dismisses the menu.
