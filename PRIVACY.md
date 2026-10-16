@@ -20,22 +20,27 @@ Moka caches enrichment results and downloaded artwork locally. Moka does not sen
 
 Diagnostics are generated locally. Exporting a diagnostic report happens only after the user chooses a destination through Android's document picker. The report can include device model, Android version, audio route, local track metadata, DSP settings and recent Moka error information. It does not include the audio contents of the music file.
 
-## Accounts and streaming
+## Accounts and optional streaming
 
-Moka Beta does not require a streaming-service account and does not contain Apple Music, YouTube Music, TIDAL or other subscription-streaming authentication.
+Moka does **not** require a developer-operated or subscription-streaming account for local playback. The optional Navidrome/Subsonic integration connects only to a **server chosen by the user**, over HTTPS, when the user supplies that server URL and their own credentials.
 
+When **Remember login** is enabled, Moka stores the server URL and username in device-local app preferences and encrypts the saved password using an Android Keystore AES-GCM key; the encrypted login file lives in app-private `noBackupFilesDir` and is excluded from Android backup. Saved credentials can be deleted using the **Forget server / saved login** control. Disconnecting from the server does not itself erase a remembered login, so that the user can reconnect later. Unchecking remembered login deletes the saved encrypted credentials.
 
-## Beta 6 optional features (development branch)
+For Subsonic server requests, the app uses salted-token authentication in HTTPS request parameters; server operators and reverse proxies should avoid logging signed API/stream URLs or authentication parameters. Music files are streamed on demand from the user's chosen server; Moka does not automatically upload local music files to the server.
 
-AutoEq model searches download a publicly available index from GitHub when you
-request a search; selecting a model downloads its profile from GitHub. The
-local library health audit inspects cached metadata and does not edit or upload
-audio files. Named-device DSP snapshots are stored only on the phone.
+Moka's local music playback and DSP features remain available without configuring Navidrome. A user's choice to use a third-party server is governed by that server operator's policies.
 
-The experimental Navidrome/Subsonic network option connects only when you enter
-a server URL and credentials. It requires HTTPS; the password is kept in app
-memory and is not saved. Requests and streams use the server's Subsonic
-salted-token authentication in the HTTPS URL. Authentication parameters may
-appear in server/proxy logs and must be protected by your server administrator.
-Disconnect or leave the screen to discard the in-memory session. Server music
-is streamed on demand; Moka does not automatically upload or sync local music.
+## Optional features and downloaded data
+
+- **AutoEq headphone profile search**: When requested, Moka downloads a public headphone index and selected profile files from GitHub. This sends normal HTTPS requests to GitHub-hosted resources.
+- **MusicBrainz / Cover Art Archive**: When invoked, the app can request public metadata and artwork; normal HTTPS request data may be visible to the respective network services.
+- **Library health audit**: Inspects device-local library information and does not transmit audio files. Duplicate removal requires explicit user confirmation.
+- **Saved sound presets**: Device-specific DSP preferences are stored locally.
+
+## Control and contact
+
+The user may decline optional online integrations and continue using local audio. Uninstalling Moka removes app-private data according to Android's app-removal behavior; the encrypted Navidrome password is not included in standard Android app backups.
+
+For questions or to request corrections to this notice, open an issue at https://github.com/JLukassen/MokaMusicPlayer/issues. Before submitting a public issue, remove private server URLs, tokens, personal information, and music filenames you do not want to disclose.
+
+**Google Play readiness:** This statement should be reviewed against the actual shipped app and Google Play Data safety form before submitting any store release. It is not a substitute for the required Play Console declarations.
