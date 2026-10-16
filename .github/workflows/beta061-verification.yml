@@ -2,7 +2,7 @@ name: Beta 6 RC2.5 integration verification
 
 on:
   push:
-    branches: [beta061-network-duplicate-safety]
+    branches: [beta061-network-duplicate-safety, master]
   pull_request:
     branches: [master]
   workflow_dispatch:
