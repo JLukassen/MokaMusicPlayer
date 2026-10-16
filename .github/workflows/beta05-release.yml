@@ -2,7 +2,8 @@ name: Beta 5 Android build and tagged APK
 
 on:
   push:
-    branches: [master, beta05-library-performance]
+    # Historical Beta 5 workflow; do not run or publish Beta 5 on future master pushes.
+    branches: [beta05-library-performance]
   workflow_dispatch:
 
 permissions:
