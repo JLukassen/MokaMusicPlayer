@@ -37,6 +37,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ExecutorService
 import kotlin.math.max
 
 /**
@@ -56,11 +57,13 @@ import kotlin.math.max
  */
 class DirectPcmEngine(
     context: Context,
-    private val callback: Callback
+    private val callback: Callback,
+    private val manageAudioFocus: Boolean = true
 ) {
     interface Callback {
         fun onStateChanged(state: State)
         fun onReady(durationMs: Long)
+        fun onAudioStarted()
         fun onEnded()
         fun onFallbackRequired(positionMs: Long, reason: String)
     }
@@ -112,6 +115,106 @@ class DirectPcmEngine(
     @Volatile private var lastPipelineMetricMs = 0L
 
     private var focusRequest: AudioFocusRequest? = null
+    @Volatile private var outputVolume = 1f
+    private val outputLock = Any()
+    private var parkedTrack: AudioTrack? = null
+    private var parkedRouteId = -1
+
+    private sealed interface WarmSource {
+        val uri: Uri
+        fun close()
+    }
+
+    private class WarmWav(override val uri: Uri, val descriptor: ParcelFileDescriptor) : WarmSource {
+        override fun close() = descriptor.close()
+    }
+
+    private class WarmDecoded(override val uri: Uri, val extractor: MediaExtractor) : WarmSource {
+        override fun close() = extractor.release()
+    }
+
+    private val prefetchLock = Any()
+    private val prefetchVersion = AtomicLong(0)
+    private var warmSource: WarmSource? = null
+    private val prefetchExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "MokaNextTrackPrefetch").apply { priority = Thread.MIN_PRIORITY + 1 }
+    }
+
+    /** Open the next local item off the audio thread. At most one FD/extractor is retained. */
+    fun prefetch(item: MediaItem?) {
+        val uri = item?.localConfiguration?.uri
+        val ticket = prefetchVersion.incrementAndGet()
+        if (uri == null) {
+            synchronized(prefetchLock) { warmSource?.close(); warmSource = null }
+            return
+        }
+        if (synchronized(prefetchLock) { warmSource?.uri == uri }) return
+        runCatching {
+            prefetchExecutor.execute {
+                var prepared: WarmSource? = null
+                try {
+                    val label = item?.mediaMetadata?.extras
+                        ?.getString(AudioPathMonitor.EXTRA_FORMAT_LABEL).orEmpty()
+                    val isWav = label.equals("WAV", true) ||
+                        uri.lastPathSegment.orEmpty().lowercase().let { it.endsWith(".wav") || it.endsWith(".wave") }
+                    prepared = if (isWav) {
+                        appContext.contentResolver.openFileDescriptor(uri, "r")?.let { WarmWav(uri, it) }
+                    } else {
+                        WarmDecoded(uri, MediaExtractor().also { extractor ->
+                            try {
+                                extractor.setDataSource(appContext, uri, null)
+                            } catch (t: Exception) {
+                                extractor.release()
+                                throw t
+                            }
+                        })
+                    }
+                    synchronized(prefetchLock) {
+                        if (prefetchVersion.get() == ticket) {
+                            warmSource?.close()
+                            warmSource = prepared
+                            prepared = null
+                            Log.i(AUDIO_LOG_TAG, "Next-track source prepared (wav=$isWav)")
+                        }
+                    }
+                } catch (t: Exception) {
+                    Log.d(AUDIO_LOG_TAG, "Next-track prefetch unavailable: ${t.javaClass.simpleName}")
+                } finally {
+                    prepared?.close()
+                }
+            }
+        }
+    }
+
+    private fun takeWarmWav(uri: Uri): ParcelFileDescriptor? = synchronized(prefetchLock) {
+        val warm = warmSource as? WarmWav ?: return@synchronized null
+        if (warm.uri != uri) return@synchronized null
+        warmSource = null
+        Log.i(AUDIO_LOG_TAG, "Next-track WAV descriptor reused")
+        warm.descriptor
+    }
+
+    private fun takeWarmDecoded(uri: Uri): MediaExtractor? = synchronized(prefetchLock) {
+        val warm = warmSource as? WarmDecoded ?: return@synchronized null
+        if (warm.uri != uri) return@synchronized null
+        warmSource = null
+        Log.i(AUDIO_LOG_TAG, "Next-track decoder extractor reused")
+        warm.extractor
+    }
+
+    fun setOutputVolume(volume: Float) {
+        outputVolume = volume.coerceIn(0f, 1f)
+        runCatching { audioTrack?.setVolume(outputVolume) }
+    }
+
+    /** Clear any stopped stream when the route changes (e.g. Bluetooth disconnects). */
+    fun invalidateOutputCache() {
+        synchronized(outputLock) {
+            parkedTrack?.let { runCatching { it.release() } }
+            parkedTrack = null
+            parkedRouteId = -1
+        }
+    }
 
     fun canAttempt(item: MediaItem): Boolean {
         val uri = item.localConfiguration?.uri ?: return false
@@ -150,7 +253,7 @@ class DirectPcmEngine(
     }
 
     fun prepare(item: MediaItem, startPositionMs: Long, playWhenReady: Boolean) {
-        stopInternal(clearMonitor = false)
+        stopInternal(clearMonitor = false, preserveOutputCache = state == State.ENDED)
         val token = generation.incrementAndGet()
         stopRequested = false
         pauseRequested = !playWhenReady
@@ -216,9 +319,11 @@ class DirectPcmEngine(
                         writer.stop()
                         if (activeDspWriter === writer) activeDspWriter = null
                     }
-                    releaseAudioTrack()
+                    val endedNaturally = state == State.ENDED && !stopRequested
+                    if (endedNaturally) parkAudioTrack() else releaseAudioTrack()
                     abandonAudioFocus()
                     releaseWakeLock()
+                    if (endedNaturally) callback.onEnded()
                 }
             }
         }, "MokaDirectPcm").apply {
@@ -243,6 +348,7 @@ class DirectPcmEngine(
                 acquireWakeLock()
                 isPlaying = true
                 setState(State.PLAYING)
+                callback.onAudioStarted()
             }
         }
     }
@@ -270,11 +376,13 @@ class DirectPcmEngine(
 
     fun release() {
         stop()
+        prefetch(null)
+        prefetchExecutor.shutdownNow()
         dspReloadExecutor.shutdownNow()
     }
 
     private fun playWav(uri: Uri, item: MediaItem, startPositionMs: Long, token: Long) {
-        val pfd = appContext.contentResolver.openFileDescriptor(uri, "r")
+        val pfd = takeWarmWav(uri) ?: appContext.contentResolver.openFileDescriptor(uri, "r")
             ?: throw DirectUnsupported("Unable to open WAV")
         ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input ->
                 val channel = input.channel
@@ -315,7 +423,8 @@ class DirectPcmEngine(
                 // DSP used to start AudioTrack empty, then read/process almost a full second of
                 // audio at once. The track could drain before the next batch was ready. Feed much
                 // smaller chunks and pre-roll one chunk before starting playback.
-                if (!floatPath) startTrackIfRequested(track)
+                // Do not start an empty AudioTrack; prime it with the first PCM chunk.
+                var integerOutputStarted = false
 
                 val ioFrames = if (floatPath) DSP_IO_FRAMES else max(4096, info.sampleRate / 2)
                 val ioBytes = max(frameSize, ioFrames * frameSize)
@@ -333,7 +442,7 @@ class DirectPcmEngine(
                         currentPositionMs = target
                         dsp?.reset()
                         dspWriter?.resetForSeek()
-                        if (!floatPath) startTrackIfRequested(track)
+                        if (!floatPath) integerOutputStarted = false
                     }
 
                     if (pauseRequested || !playRequested) {
@@ -377,6 +486,9 @@ class DirectPcmEngine(
                             if (written < 0) throw DirectUnsupported("AudioTrack write failed: $written")
                             writtenTotal += written
                         }
+                        if (!integerOutputStarted && writtenTotal > 0) {
+                            integerOutputStarted = startTrackIfRequested(track)
+                        }
                     }
                     bytesConsumed += read
                     currentPositionMs = if (info.byteRate > 0) bytesConsumed * 1000L / info.byteRate else 0L
@@ -389,9 +501,9 @@ class DirectPcmEngine(
                         dspWriter!!.finishAndDrain()
                         if (activeDspWriter === dspWriter) activeDspWriter = null
                     }
+                    if (!floatPath) runCatching { track.stop() } // drain final queued PCM
                     isPlaying = false
                     setState(State.ENDED)
-                    callback.onEnded()
                 }
         }
     }
@@ -403,9 +515,10 @@ class DirectPcmEngine(
         token: Long,
         requireExactSource: Boolean
     ) {
-        val extractor = MediaExtractor()
+        val reusedExtractor = takeWarmDecoded(uri)
+        val extractor = reusedExtractor ?: MediaExtractor()
         try {
-            extractor.setDataSource(appContext, uri, null)
+            if (reusedExtractor == null) extractor.setDataSource(appContext, uri, null)
             val trackIndex = (0 until extractor.trackCount).firstOrNull { index ->
                 extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
             } ?: throw DirectUnsupported("No decodable audio track")
@@ -484,6 +597,7 @@ class DirectPcmEngine(
         var actualChannels = sourceChannels
         var dsp: DspStreamAdapter? = null
         var floatPath = false
+        var integerOutputStarted = false
         var dspWriter: DspAudioWriter? = null
         var appliedDspRevision = dspSettingsRevision.get()
 
@@ -499,7 +613,7 @@ class DirectPcmEngine(
                 currentPositionMs = target
                 dsp?.reset()
                 dspWriter?.resetForSeek()
-                if (!floatPath) track?.let(::startTrackIfRequested)
+                if (!floatPath) integerOutputStarted = false
             }
 
             if (!inputEnded) {
@@ -563,7 +677,7 @@ class DirectPcmEngine(
                         if (floatPath) "Moka DSP · $codecName · 32-bit float" else "Moka Direct $codecName"
                     )
                     callback.onReady(durationMs)
-                    if (!floatPath) startTrackIfRequested(newTrack)
+                    integerOutputStarted = false
                 }
                 else -> if (outputIndex >= 0) {
                     val outputBuffer = codec.getOutputBuffer(outputIndex)
@@ -604,6 +718,9 @@ class DirectPcmEngine(
                                 val written = activeTrack.write(outputBuffer, outputBuffer.remaining(), AudioTrack.WRITE_BLOCKING)
                                 if (written < 0) throw DirectUnsupported("AudioTrack write failed: $written")
                             }
+                            if (!integerOutputStarted) {
+                                integerOutputStarted = startTrackIfRequested(activeTrack)
+                            }
                         }
                         currentPositionMs = info.presentationTimeUs.coerceAtLeast(0L) / 1000L
                     }
@@ -620,9 +737,9 @@ class DirectPcmEngine(
                 dspWriter?.finishAndDrain()
                 if (activeDspWriter === dspWriter) activeDspWriter = null
             }
+            if (!floatPath) track?.let { runCatching { it.stop() } }
             isPlaying = false
             setState(State.ENDED)
-            callback.onEnded()
         }
     }
 
@@ -825,6 +942,7 @@ class DirectPcmEngine(
             acquireWakeLock()
             isPlaying = true
             setState(State.PLAYING)
+            callback.onAudioStarted()
             true
         } else {
             isPlaying = false
@@ -861,7 +979,38 @@ class DirectPcmEngine(
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setBufferSizeInBytes(bufferBytes)
 
-        val track = builder.build()
+        val parked = synchronized(outputLock) {
+            val old = parkedTrack
+            val previousRoute = parkedRouteId
+            parkedTrack = null
+            parkedRouteId = -1
+            old to previousRoute
+        }
+        val currentRouteIds = runCatching {
+            if (Build.VERSION.SDK_INT >= 33) {
+                audioManager.getAudioDevicesForAttributes(mediaAttributes).map { it.id }.toSet()
+            } else {
+                audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.id }.toSet()
+            }
+        }.getOrDefault(emptySet())
+        val canReuse = mixer == null &&
+            parked.first != null &&
+            parked.first!!.state == AudioTrack.STATE_INITIALIZED &&
+            parked.first!!.format.sampleRate == sampleRate &&
+            parked.first!!.format.channelCount == channels &&
+            parked.first!!.format.encoding == encoding &&
+            parked.first!!.playState != AudioTrack.PLAYSTATE_PLAYING &&
+            (parked.second < 0 || parked.second in currentRouteIds)
+        val track = if (canReuse) {
+            val reused = parked.first!!
+            runCatching { reused.flush() }
+            Log.i(AUDIO_LOG_TAG, "AudioTrack reused: rate=$sampleRate channels=$channels encoding=${encoding.pcmEncodingLabel()}")
+            reused
+        } else {
+            parked.first?.let { runCatching { it.release() } }
+            builder.build()
+        }
+        runCatching { track.setVolume(outputVolume) }
         if (track.state != AudioTrack.STATE_INITIALIZED) {
             track.release()
             clearPreferredUsbMixer()
@@ -1021,6 +1170,7 @@ class DirectPcmEngine(
     }
 
     private fun requestAudioFocus(): Boolean {
+        if (!manageAudioFocus) return true
         if (focusRequest == null) {
             focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(mediaAttributes)
@@ -1036,6 +1186,7 @@ class DirectPcmEngine(
     }
 
     private fun abandonAudioFocus() {
+        if (!manageAudioFocus) return
         focusRequest?.let { runCatching { audioManager.abandonAudioFocusRequest(it) } }
     }
 
@@ -1052,7 +1203,8 @@ class DirectPcmEngine(
         callback.onStateChanged(newState)
     }
 
-    private fun stopInternal(clearMonitor: Boolean) {
+    private fun stopInternal(clearMonitor: Boolean, preserveOutputCache: Boolean = false) {
+        if (!preserveOutputCache) invalidateOutputCache()
         stopRequested = true
         playRequested = false
         pauseRequested = true
@@ -1082,6 +1234,24 @@ class DirectPcmEngine(
             AudioPathMonitor.endDirectPath()
             AudioPathMonitor.clearOutput()
         }
+    }
+
+    private fun parkAudioTrack() {
+        val track = audioTrack ?: return
+        audioTrack = null
+        // USB bit-perfect mixer state is route-specific; never carry it to another item.
+        if (activeUsbDevice != null || runCatching { track.routedDevice?.type.isUsbAudio() }.getOrDefault(false)) {
+            runCatching { track.release() }
+            return
+        }
+        runCatching { track.pause() }
+        runCatching { track.flush() }
+        synchronized(outputLock) {
+            parkedTrack?.let { runCatching { it.release() } }
+            parkedTrack = track
+            parkedRouteId = runCatching { track.routedDevice?.id }.getOrNull() ?: -1
+        }
+        Log.i(AUDIO_LOG_TAG, "AudioTrack parked for next compatible local track")
     }
 
     private fun releaseAudioTrack() {
@@ -1219,8 +1389,22 @@ class DirectPcmEngine(
         @Volatile var started = false
             private set
         private val primedSamples = AtomicInteger(0)
+        private val createdAtMs = android.os.SystemClock.elapsedRealtime()
+        private val bluetoothOutput = runCatching {
+            val routeType = track.routedDevice?.type ?: if (Build.VERSION.SDK_INT >= 33) {
+                audioManager.getAudioDevicesForAttributes(mediaAttributes).firstOrNull()?.type
+            } else null
+            routeType.isBluetoothAudio()
+        }.getOrDefault(false)
+        private val primeTargetMs =
+            if (bluetoothOutput) DSP_PRIME_BLUETOOTH_TARGET_MS else DSP_PRIME_TARGET_MS
+        private val primeTargetFrames = minOf(
+            max(DSP_PRIME_MIN_FRAMES, sampleRate * primeTargetMs / 1000),
+            max(DSP_PRIME_MIN_FRAMES, runCatching { track.bufferCapacityInFrames }.getOrDefault(sampleRate * 2) * 2 / 3)
+        )
 
         init {
+            Log.i(AUDIO_LOG_TAG, "DSP pre-roll: target=${primeTargetMs}ms, frames=$primeTargetFrames, bluetooth=$bluetoothOutput")
             worker.priority = Thread.MAX_PRIORITY
             worker.start()
         }
@@ -1318,11 +1502,6 @@ class DirectPcmEngine(
 
         private fun writePacket(samples: FloatArray, packetEpoch: Int) {
             var offset = 0
-            val capacityFrames = runCatching { track.bufferCapacityInFrames }.getOrDefault(sampleRate * 2)
-            val primeTargetFrames = minOf(
-                max(DSP_PRIME_MIN_FRAMES, sampleRate * DSP_PRIME_TARGET_MS / 1000),
-                max(DSP_PRIME_MIN_FRAMES, capacityFrames * 2 / 3)
-            )
             val primeTargetSamples = primeTargetFrames * channels
 
             while (
@@ -1366,6 +1545,7 @@ class DirectPcmEngine(
                             Log.i(
                                 AUDIO_LOG_TAG,
                                 "DSP writer started after ${primed / channels} frames; " +
+                                    "startupMs=${android.os.SystemClock.elapsedRealtime() - createdAtMs} " +
                                     "queue=${queue.size}/$DSP_QUEUE_PACKETS"
                             )
                         }
@@ -1396,6 +1576,9 @@ class DirectPcmEngine(
         private const val DSP_IO_FRAMES = 4096
         private const val DSP_PRIME_MIN_FRAMES = 8_192
         private const val DSP_PRIME_TARGET_MS = 500
+        // Bluetooth adds transport buffering; shorter PCM pre-roll reduces gaps.
+        // Retain an eight-thousand-frame minimum as a cushion against underruns.
+        private const val DSP_PRIME_BLUETOOTH_TARGET_MS = 250
         private const val DSP_QUEUE_PACKETS = 24
         private const val DSP_DRAIN_TIMEOUT_SECONDS = 8L
         private const val NO_SEEK = -1L

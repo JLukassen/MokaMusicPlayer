@@ -24,6 +24,10 @@ data class MusicTrack(
     val sampleRateHz: Int? = null,
     val bitDepth: Int? = null,
     val channelCount: Int? = null,
+    val bitrateBps: Int? = null,
+    val sourceFormatLabel: String? = null,
+    val networkStreamLabel: String? = null,
+    val networkSongId: String? = null,
     val normalizationGainDb: Float? = null,
     val albumNormalizationGainDb: Float? = null,
     val musicBrainzReleaseGroupId: String? = null,
@@ -37,7 +41,7 @@ data class MusicTrack(
     val sourceAlbumNormalizationGainDb: Float? = null
 ) {
     val formatLabel: String
-        get() = when {
+        get() = sourceFormatLabel ?: when {
             mimeType?.contains("flac", ignoreCase = true) == true || displayName.endsWith(".flac", true) -> "FLAC"
             mimeType?.contains("wav", ignoreCase = true) == true || displayName.endsWith(".wav", true) -> "WAV"
             mimeType?.contains("opus", ignoreCase = true) == true || displayName.endsWith(".opus", true) -> "OPUS"

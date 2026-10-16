@@ -1,0 +1,84 @@
+name: Moka Beta 6 tagged prerelease APK
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: moka-beta06-tagged-release
+  cancel-in-progress: false
+
+jobs:
+  build-test-publish:
+    if: github.repository == 'JLukassen/MokaMusicPlayer' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-37.2" "build-tools;37.0.0" \
+            --channel=3 "cmake;3.22.1" "ndk;28.2.13676358"
+      - name: Test and build debug APK and AndroidTest APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --no-build-cache --stacktrace
+      - name: Verify package, version, and debug signature
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" |
+            grep -E "package: name='com.mokamusic.player'.*versionCode='38'.*versionName='4.0.0-beta06'"
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$APK"
+          cp "$APK" Moka-Music-Player-4.0.0-beta06-debug.apk
+          sha256sum Moka-Music-Player-4.0.0-beta06-debug.apk > SHA256SUMS.txt
+      - name: Upload build for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: moka-beta06-tagged-test-apk
+          path: |
+            Moka-Music-Player-4.0.0-beta06-debug.apk
+            SHA256SUMS.txt
+            app/build/reports/tests/testDebugUnitTest/**
+            app/build/test-results/testDebugUnitTest/**
+          if-no-files-found: error
+      - name: Tag and publish Beta 6 GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=v4.0.0-beta06
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::Beta 6 release already exists. Will not overwrite."
+            exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists without a release. Refusing to repoint it."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Moka Music Player 4.0 Beta 6 — tested prerelease"
+          git push origin "refs/tags/$TAG"
+          gh release create "$TAG" \
+            Moka-Music-Player-4.0.0-beta06-debug.apk SHA256SUMS.txt \
+            --verify-tag \
+            --title "Moka Music Player 4.0 Beta 6 (test APK)" \
+            --prerelease \
+            --notes-file docs/BETA6_RELEASE_NOTES.md

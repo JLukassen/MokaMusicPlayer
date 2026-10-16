@@ -13,16 +13,21 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
-import androidx.media3.session.MediaSessionService
+import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import com.mokamusic.player.MainActivity
 import com.mokamusic.player.audio.AudioPathMonitor
 import com.mokamusic.player.audio.MokaAudioOutputProvider
 
-class PlaybackService : MediaSessionService() {
-    private var mediaSession: MediaSession? = null
+class PlaybackService : MediaLibraryService() {
+    private var mediaSession: MediaLibrarySession? = null
+    private var browserCallback: CarLibraryCallback? = null
     private var hybridPlayer: HiFiHybridPlayer? = null
 
     private val noisyReceiver = object : BroadcastReceiver() {
@@ -47,10 +52,22 @@ class PlaybackService : MediaSessionService() {
         val renderersFactory = DefaultRenderersFactory(this)
             .setEnableAudioFloatOutput(true)
 
+        // Media3 handles every HTTPS/Navidrome source. A slower WAV/FLAC stream on
+        // cellular or Tailscale needs longer read timeouts than a local audio file.
+        // Do not permit HTTPS -> HTTP redirects for signed streaming URLs.
+        val httpSourceFactory = DefaultHttpDataSource.Factory()
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(45_000)
+            .setAllowCrossProtocolRedirects(false)
+            .setUserAgent("MokaMusicPlayer/4.0")
+        val mediaSources = DefaultMediaSourceFactory(this)
+            .setDataSourceFactory(DefaultDataSource.Factory(this, httpSourceFactory))
+
         val audioOutputProvider = MokaAudioOutputProvider(this)
         val fallback = ExoPlayer.Builder(this, renderersFactory)
+            .setMediaSourceFactory(mediaSources)
             .setAudioOutputProvider(audioOutputProvider)
-            .setAudioAttributes(musicAttributes, true)
+            .setAudioAttributes(musicAttributes, false) // MokaAudioFocusController owns focus for both engines
             .setHandleAudioBecomingNoisy(false) // handled for both engines by this service
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
@@ -89,7 +106,8 @@ class PlaybackService : MediaSessionService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        mediaSession = MediaSession.Builder(this, player)
+        browserCallback = CarLibraryCallback(this)
+        mediaSession = MediaLibrarySession.Builder(this, player, browserCallback!!)
             .setSessionActivity(sessionActivity)
             .build()
 
@@ -102,7 +120,7 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? = mediaSession
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(noisyReceiver) }
@@ -111,6 +129,8 @@ class PlaybackService : MediaSessionService() {
             release()
         }
         hybridPlayer = null
+        browserCallback?.close()
+        browserCallback = null
         AudioPathMonitor.clearAll()
         mediaSession = null
         super.onDestroy()

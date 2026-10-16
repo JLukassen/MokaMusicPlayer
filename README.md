@@ -2,11 +2,19 @@
 
 **Moka Music Player** is a local-first high-fidelity Android music player built around transparent audio routing, source-rate-aware playback and a native real-time DSP engine.
 
-> **Latest test release: [v4.0.0-beta05](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta05)** · Android versionCode **26** · debug-signed prerelease
+> **Latest test release: [v4.0.0-beta06](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta06)** · Android versionCode **38** · debug-signed GitHub prerelease
 >
-> **[Download the Beta 5 APK](https://github.com/JLukassen/MokaMusicPlayer/releases/download/v4.0.0-beta05/Moka-Music-Player-4.0.0-beta05-debug.apk)** · [SHA-256 checksums](https://github.com/JLukassen/MokaMusicPlayer/releases/download/v4.0.0-beta05/SHA256SUMS.txt) · [Full changelog](CHANGELOG.md) · [Previous Beta 4](https://github.com/JLukassen/MokaMusicPlayer/releases/tag/v4.0.0-beta04)
+> **[Download the Beta 6 APK](https://github.com/JLukassen/MokaMusicPlayer/releases/download/v4.0.0-beta06/Moka-Music-Player-4.0.0-beta06-debug.apk)** · [SHA-256 checksums](https://github.com/JLukassen/MokaMusicPlayer/releases/download/v4.0.0-beta06/SHA256SUMS.txt) · [Beta 6 release notes](docs/BETA6_RELEASE_NOTES.md) · [Full changelog](CHANGELOG.md)
 >
-> Beta 5 is for device testing, **not a Play Store–signed production release**. Its GitHub Actions unit tests and debug APK build passed; Pixel 8a and Samsung hardware regression testing remains in progress. Moka intentionally does not offer subscription streaming in the beta: it controls local playback and DSP without relying on a streaming provider's DRM, SDK or developer program.
+> **Important:** This is a debug-signed device-test APK, **not a production release-signed build**. If your currently installed Moka APK was signed with a different certificate, Android cannot update it in place. Do not uninstall an existing build with important data without a backup/migration plan.
+
+## Beta 6 — integrated Android testing
+
+Beta 6 integrates the previously tested RC2.5 features: an HTTPS Navidrome/Subsonic library within Moka, encrypted saved credentials, full library browsing and paging, network/local queue and shuffle features, original/lossless network streams where available, honest WMA transcoding, and source audio technical metadata.
+
+It also includes AutoEq headphone discovery, multimodal presets, local duplicate review, improved car playback/focus behavior, loudness stability, and Android Auto browsing. The Beta 6 version bump to `4.0.0-beta06` / versionCode 38 does not intentionally change the RC2.5 playback algorithms.
+
+Android beta testers should verify USB/BT output, network WMA/FLAC/WAV tracks, queue and shuffle, switching from Wi-Fi to Tailscale cellular streaming, and local library/DSP behavior. Production signing and wider hardware regression testing remain separate milestones.
 
 ## Why Moka
 

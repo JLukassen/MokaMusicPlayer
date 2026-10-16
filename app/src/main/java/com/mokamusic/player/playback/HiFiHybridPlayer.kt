@@ -2,6 +2,7 @@ package com.mokamusic.player.playback
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -35,7 +36,12 @@ class HiFiHybridPlayer(
 
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val direct = DirectPcmEngine(appContext, this)
+    private val direct = DirectPcmEngine(appContext, this, manageAudioFocus = false)
+    private val focus = MokaAudioFocusController(appContext, ::onSystemAudioFocusChanged)
+    private val transition = PlaybackTransitionTrace()
+    private var focusSuspended = false
+    private var resumeOnFocusGain = false
+    private var focusDucked = false
     private val dspStore = DspSettingsStore(appContext)
     private val dspReloadRunnable = Runnable { reloadCurrentItemForDspSettings() }
     private val dspPreferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
@@ -53,7 +59,26 @@ class HiFiHybridPlayer(
     private var switchingInternally = false
 
     private val fallbackListener = object : Player.Listener {
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (!directActive && playbackState == Player.STATE_ENDED) {
+                restoreDucking()
+                desiredPlayWhenReady = false
+                focus.abandon()
+            }
+            if (!directActive && playbackState == Player.STATE_READY) {
+                transition.ready("media3")
+                if (fallback.isPlaying) transition.audible("media3-ready")
+            }
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (!directActive && isPlaying) transition.audible("media3-playing")
+        }
+
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && !directActive) {
+                transition.begin("media3-auto", mediaItem?.mediaId.orEmpty())
+            }
             if (switchingInternally || directActive) return
             val item = mediaItem ?: return
             val wasPlaying = fallback.playWhenReady
@@ -100,7 +125,7 @@ class HiFiHybridPlayer(
 
         return state.buildUpon()
             .setPlayWhenReady(
-                desiredPlayWhenReady && playbackState != Player.STATE_ENDED,
+                desiredPlayWhenReady && !focusSuspended && playbackState != Player.STATE_ENDED,
                 Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST
             )
             .setPlaybackState(playbackState)
@@ -115,8 +140,17 @@ class HiFiHybridPlayer(
         startIndex: Int,
         startPositionMs: Long
     ): ListenableFuture<*> {
+        transition.begin(
+            "queue-replacement",
+            mediaItems.getOrNull(startIndex.takeIf { it >= 0 } ?: 0)?.mediaId.orEmpty()
+        )
+        Log.i(TAG, "Queue replaced items=${mediaItems.size} startIndex=$startIndex")
         deactivateDirect(clearMonitor = true)
+        restoreDucking()
         desiredPlayWhenReady = false
+        resumeOnFocusGain = false
+        focusSuspended = false
+        focus.abandon()
         return super.handleSetMediaItems(mediaItems, startIndex, startPositionMs)
     }
 
@@ -125,15 +159,31 @@ class HiFiHybridPlayer(
         if (item != null && direct.canAttempt(item)) {
             fallback.playWhenReady = false
             AudioPathMonitor.beginDirectPath()
-            val future = super.handlePrepare()
+            // Keep Media3 idle while direct PCM prepares. Starting both renderer pipelines
+            // wastes I/O and can initialize a second AudioTrack during transitions.
             activateDirect(item, fallback.currentPosition.coerceAtLeast(0L), desiredPlayWhenReady)
-            return future
+            return Futures.immediateVoidFuture()
         }
         return super.handlePrepare()
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
+        if (playWhenReady && !focus.request()) {
+            Log.w(TAG, "Playback deferred: audio focus not granted")
+            desiredPlayWhenReady = false
+            focusSuspended = true
+            invalidateState()
+            return Futures.immediateVoidFuture()
+        }
         desiredPlayWhenReady = playWhenReady
+        if (!playWhenReady) {
+            restoreDucking()
+            resumeOnFocusGain = false
+            focusSuspended = false
+            focus.abandon()
+        } else {
+            focusSuspended = false
+        }
         val item = fallback.currentMediaItem
         if (directActive) {
             if (playWhenReady) direct.play() else direct.pause()
@@ -157,6 +207,9 @@ class HiFiHybridPlayer(
         val targetIndex = mediaItemIndex.takeIf { it != C.INDEX_UNSET } ?: currentIndex
         val targetPosition = positionMs.coerceAtLeast(0L)
 
+        if (targetIndex != currentIndex && targetIndex in 0 until fallback.mediaItemCount) {
+            transition.begin("manual-seek", fallback.getMediaItemAt(targetIndex).mediaId)
+        }
         if (directActive && targetIndex == currentIndex) {
             direct.seekTo(targetPosition)
             directPositionMs = targetPosition
@@ -204,6 +257,8 @@ class HiFiHybridPlayer(
     override fun handleRelease(): ListenableFuture<*> {
         mainHandler.removeCallbacks(dspReloadRunnable)
         dspStore.unregisterListener(dspPreferenceListener)
+        focus.abandon()
+        restoreDucking()
         direct.release()
         fallback.removeListener(fallbackListener)
         AudioPathMonitor.endDirectPath()
@@ -221,26 +276,34 @@ class HiFiHybridPlayer(
 
     override fun onReady(durationMs: Long) {
         mainHandler.post {
+            transition.ready("direct")
             directDurationMs = durationMs
             directPositionMs = direct.currentPositionMs
             invalidateState()
         }
     }
 
+    override fun onAudioStarted() {
+        mainHandler.post { transition.audible("direct-audiotrack") }
+    }
+
     override fun onEnded() {
         mainHandler.post {
             if (!directActive) return@post
             if (fallback.repeatMode == Player.REPEAT_MODE_ONE) {
-                direct.seekTo(0L)
-                if (desiredPlayWhenReady) direct.play()
-                invalidateState()
+                val repeating = fallback.currentMediaItem
+                if (repeating != null) {
+                    transition.begin("repeat-one", repeating.mediaId)
+                    activateDirect(repeating, 0L, desiredPlayWhenReady)
+                }
                 return@post
             }
 
             val before = fallback.currentMediaItemIndex
             switchingInternally = true
             try {
-                direct.stop()
+                // The natural EOS path has already parked the output for same-format reuse.
+                // Do NOT call direct.stop() before the next direct prepare.
                 directActive = false
                 fallback.seekToNextMediaItem()
                 var after = fallback.currentMediaItemIndex
@@ -250,7 +313,10 @@ class HiFiHybridPlayer(
                 }
 
                 if (after == before || after == C.INDEX_UNSET) {
+                    direct.stop()
+                    restoreDucking()
                     desiredPlayWhenReady = false
+                    focus.abandon()
                     directState = DirectPcmEngine.State.ENDED
                     AudioPathMonitor.endDirectPath()
                     invalidateState()
@@ -258,9 +324,11 @@ class HiFiHybridPlayer(
                 }
 
                 val next = fallback.currentMediaItem
+                transition.begin("direct-next", next?.mediaId.orEmpty())
                 if (next != null && direct.canAttempt(next)) {
                     activateDirect(next, 0L, desiredPlayWhenReady)
                 } else {
+                    direct.stop() // discard parked direct output before Media3 renders
                     AudioPathMonitor.endDirectPath()
                     fallback.stop()
                     if (after != C.INDEX_UNSET) fallback.seekTo(after, 0L)
@@ -329,6 +397,7 @@ class HiFiHybridPlayer(
         val shouldPlay = desiredPlayWhenReady || fallback.playWhenReady
         val shouldUseDirect = direct.canAttempt(item)
 
+        transition.begin("dsp-route-rebuild", item.mediaId)
         switchingInternally = true
         try {
             if (shouldUseDirect) {
@@ -356,6 +425,11 @@ class HiFiHybridPlayer(
     }
 
     fun pauseForNoisyRoute() {
+        focus.abandon()
+        restoreDucking()
+        focusSuspended = false
+        resumeOnFocusGain = false
+        direct.invalidateOutputCache()
         desiredPlayWhenReady = false
         if (directActive) direct.pause() else fallback.pause()
         invalidateState()
@@ -376,7 +450,58 @@ class HiFiHybridPlayer(
         )
         AudioPathMonitor.beginDirectPath()
         direct.prepare(item, positionMs, playWhenReady)
+        // Prepare only the next queue entry (respecting shuffle/repeat), never the whole library.
+        val nextIndex = fallback.nextMediaItemIndex
+        direct.prefetch(
+            if (nextIndex != C.INDEX_UNSET && nextIndex in 0 until fallback.mediaItemCount)
+                fallback.getMediaItemAt(nextIndex).takeIf(direct::canAttempt)
+            else null
+        )
         invalidateState()
+    }
+
+    private fun onSystemAudioFocusChanged(change: Int) {
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                Log.i(TAG, "Permanent focus loss: stop playback, no automatic resume")
+                resumeOnFocusGain = false
+                focusSuspended = true
+                desiredPlayWhenReady = false
+                restoreDucking()
+                if (directActive) direct.pause() else fallback.pause()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                resumeOnFocusGain = desiredPlayWhenReady && !focusSuspended
+                focusSuspended = true
+                restoreDucking()
+                if (directActive) direct.pause() else fallback.pause()
+                Log.i(TAG, "Transient focus loss; eligibleToResume=$resumeOnFocusGain")
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                focusDucked = true
+                direct.setOutputVolume(0.2f)
+                fallback.volume = 0.2f
+                Log.i(TAG, "Ducking for navigation or notification")
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                restoreDucking()
+                val shouldResume = resumeOnFocusGain && desiredPlayWhenReady
+                resumeOnFocusGain = false
+                focusSuspended = false
+                if (shouldResume) {
+                    Log.i(TAG, "Restoring playback after transient focus interruption")
+                    if (directActive) direct.play() else fallback.play()
+                }
+            }
+        }
+        invalidateState()
+    }
+
+    private fun restoreDucking() {
+        if (!focusDucked) return
+        focusDucked = false
+        direct.setOutputVolume(1f)
+        fallback.volume = 1f
     }
 
     private fun deactivateDirect(clearMonitor: Boolean) {
