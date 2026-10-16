@@ -1509,7 +1509,7 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                 )
                 Spacer(Modifier.width(16.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Moka 4.0 Beta 6 · dev", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                    Text("Moka Music Player", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                     Text("v$versionName · Local-first hi-fi", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                     Text("Music first. DSP when you want it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -1603,19 +1603,19 @@ private fun MoreScreen(state: MokaUiState, viewModel: MokaViewModel) {
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "Beta 4 retains the validated playback/DSP engine while adding Samsung FLAC fallback extraction, explicit unsupported-format errors, persistent failure backoff and safer loudness cache writes.",
+                        "Independent hi-fi Android playback with local audio, configurable DSP and optional HTTPS Navidrome streaming. Your local music stays on your device.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(12.dp))
                     OutlinedButton(onClick = {
                         runCatching {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/JLukassen/MokaMusicPlayer")))
+                            context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://yooshastan.com/moka/privacy/")))
                         }
                     }) {
                         Icon(Icons.Default.Code, null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Source on GitHub")
+                        Text("Privacy policy")
                     }
                 }
             }
