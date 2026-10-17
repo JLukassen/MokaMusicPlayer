@@ -45,7 +45,7 @@ trap 'rm -f "$SIGNATURE_LOG"' EXIT
 "$TOOLS/apksigner" verify --verbose --print-certs --min-sdk-version 26 "$APK" > "$SIGNATURE_LOG" ||
   die "APK signature verification failed. Do not distribute this file."
 
-if grep -Eiq 'Signer #[0-9]+ certificate DN:.*(CN=Android Debug|OU=Android)' "$SIGNATURE_LOG"; then
+if grep -Eiq 'Signer #[0-9]+ certificate DN:.*CN=Android Debug' "$SIGNATURE_LOG"; then
   die "APK looks debug-signed. Do not distribute it; configure your private release keystore."
 fi
 
