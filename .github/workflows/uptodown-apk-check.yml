@@ -1,0 +1,51 @@
+name: Uptodown release APK compilation
+
+on:
+  push:
+    branches: [uptodown-distribution]
+  pull_request:
+    branches: [play-store-launch, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uptodown-compile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk-build-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android SDK dependencies
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-37.2" "build-tools;37.0.0" \
+            --channel=3 "cmake;3.22.1" "ndk;28.2.13676358"
+      - name: Check packaging helper shell syntax
+        run: bash -n scripts/build-uptodown-apk.sh
+      - name: Unit tests and release APK compilation without keys
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-build-cache --stacktrace
+          test -s app/build/outputs/apk/release/app-release-unsigned.apk
+          echo "::notice::Unsigned APK compiled in CI; only locally signed and verified APKs may be submitted."
+      - name: Upload test reports (no APKs or signing materials)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uptodown-compile-unit-tests
+          if-no-files-found: warn
+          path: |
+            app/build/reports/tests/testDebugUnitTest/**
+            app/build/test-results/testDebugUnitTest/**
